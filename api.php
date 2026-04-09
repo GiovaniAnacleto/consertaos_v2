@@ -87,6 +87,10 @@ $tables = [
 "CREATE TABLE IF NOT EXISTS nfe_items (id INTEGER PRIMARY KEY AUTOINCREMENT, nfe_id INTEGER NOT NULL, codigo_produto TEXT DEFAULT '', descricao TEXT NOT NULL, ncm TEXT DEFAULT '', cfop TEXT DEFAULT '', unidade TEXT DEFAULT 'UN', quantidade REAL DEFAULT 1, valor_unitario REAL DEFAULT 0, valor_total REAL DEFAULT 0, valor_icms REAL DEFAULT 0, valor_ipi REAL DEFAULT 0, valor_pis REAL DEFAULT 0, valor_cofins REAL DEFAULT 0)",
 "CREATE TABLE IF NOT EXISTS nfce_emitidas (id INTEGER PRIMARY KEY AUTOINCREMENT, os_id INTEGER, venda_id INTEGER, n_prot TEXT DEFAULT '', status TEXT DEFAULT 'Aguardando', numero TEXT DEFAULT '', serie TEXT DEFAULT '', chave_acesso TEXT DEFAULT '', valor_total REAL DEFAULT 0, danfe_url TEXT DEFAULT '', xml_url TEXT DEFAULT '', motivo_rejeicao TEXT DEFAULT '', ambiente TEXT DEFAULT 'Homologacao', payload_json TEXT DEFAULT '', data_emissao DATETIME DEFAULT CURRENT_TIMESTAMP, data_atualizacao DATETIME DEFAULT CURRENT_TIMESTAMP)",
 "CREATE TABLE IF NOT EXISTS uploads_temporarios (id INTEGER PRIMARY KEY AUTOINCREMENT, token TEXT UNIQUE, os_id INTEGER, status TEXT DEFAULT 'pendente', data_expiracao DATETIME)",
+// ── FINANCEIRO ──────────────────────────────────────────────────────────────
+"CREATE TABLE IF NOT EXISTS categorias_financeiras (id INTEGER PRIMARY KEY AUTOINCREMENT, nome TEXT NOT NULL, tipo TEXT DEFAULT 'ambos', cor TEXT DEFAULT '#7d8590', ativo INTEGER DEFAULT 1, data_criacao DATETIME DEFAULT CURRENT_TIMESTAMP)",
+"CREATE TABLE IF NOT EXISTS contas_receber (id INTEGER PRIMARY KEY AUTOINCREMENT, origem TEXT DEFAULT 'manual', venda_id INTEGER, parcela_id INTEGER, cliente_id INTEGER, categoria_id INTEGER, conta_bancaria_id INTEGER, descricao TEXT NOT NULL, valor REAL DEFAULT 0, valor_recebido REAL DEFAULT 0, data_emissao DATE, data_vencimento DATE, data_recebimento DATE, status TEXT DEFAULT 'Aberta', documento_ref TEXT DEFAULT '', observacoes TEXT DEFAULT '', data_criacao DATETIME DEFAULT CURRENT_TIMESTAMP, data_atualizacao DATETIME DEFAULT CURRENT_TIMESTAMP)",
+"CREATE TABLE IF NOT EXISTS contas_pagar (id INTEGER PRIMARY KEY AUTOINCREMENT, origem TEXT DEFAULT 'manual', nfe_id INTEGER, fornecedor_id INTEGER, cliente_id INTEGER, categoria_id INTEGER, conta_bancaria_id INTEGER, descricao TEXT NOT NULL, valor REAL DEFAULT 0, valor_pago REAL DEFAULT 0, data_emissao DATE, data_vencimento DATE, data_pagamento DATE, status TEXT DEFAULT 'Aberta', documento_ref TEXT DEFAULT '', observacoes TEXT DEFAULT '', data_criacao DATETIME DEFAULT CURRENT_TIMESTAMP, data_atualizacao DATETIME DEFAULT CURRENT_TIMESTAMP)",
 ];
 foreach ($tables as $sql) {
     try { $db->exec($sql); }
@@ -146,6 +150,15 @@ $migrations = [
     ['empresa_dados',   'favicon',          "TEXT DEFAULT ''"],
     ['empresa_dados',   'telefone',         "TEXT DEFAULT ''"],
     ['empresa_dados',   'endereco',         "TEXT DEFAULT ''"],
+    // ── Migrações financeiro ─────────────────────────────────────────────
+    ['contas_receber',  'parcela_id',       'INTEGER'],
+    ['contas_receber',  'valor_recebido',   'REAL DEFAULT 0'],
+    ['contas_receber',  'conta_bancaria_id','INTEGER'],
+    ['contas_receber',  'documento_ref',    "TEXT DEFAULT ''"],
+    ['contas_pagar',    'valor_pago',       'REAL DEFAULT 0'],
+    ['contas_pagar',    'conta_bancaria_id','INTEGER'],
+    ['contas_pagar',    'documento_ref',    "TEXT DEFAULT ''"],
+    ['contas_pagar',    'cliente_id',       'INTEGER'],
     ['ordens_servico',  'informacoes_adicionais', "TEXT DEFAULT ''"],
     ['ordens_servico',  'senha_aparelho',   "TEXT DEFAULT ''"],
     ['ordens_servico',  'previsao_conclusao', 'DATE'],
@@ -1114,6 +1127,26 @@ if ($resource === 'vendas') {
                 $db->prepare("UPDATE ordens_servico SET status='Concluída',data_atualizacao=? WHERE id=?")
                    ->execute([date('Y-m-d H:i:s'),$os_id]);
             }
+
+            // ── Gerar contas a receber automaticamente ────────────────────
+            // Uma conta por parcela de cada faturamento
+            $sf2 = $db->prepare("SELECT f.*, p.id as parc_id, p.numero as parc_num, p.valor as parc_val, p.data_vencimento as parc_venc FROM venda_faturamentos f JOIN venda_parcelas p ON p.faturamento_id=f.id WHERE f.venda_id=?");
+            $sf2->execute([$vid]);
+            $parcelas_geradas = $sf2->fetchAll();
+            $now_cr = date('Y-m-d H:i:s');
+            $cli_id_cr = $data['cliente_id'] ?? null;
+            foreach ($parcelas_geradas as $parc) {
+                $nparcelas_fat = (int)$parc['num_parcelas'];
+                $desc_cr = $nparcelas_fat > 1
+                    ? "Venda #{$vid} — Parcela {$parc['parc_num']}/{$nparcelas_fat} ({$parc['forma_pagamento_nome']})"
+                    : "Venda #{$vid} — {$parc['forma_pagamento_nome']}";
+                $status_cr = ($data['status'] ?? 'Paga') === 'Paga' ? 'Recebida' : 'Aberta';
+                $val_rec   = $status_cr === 'Recebida' ? (float)$parc['parc_val'] : 0;
+                $dt_rec    = $status_cr === 'Recebida' ? date('Y-m-d') : null;
+                $db->prepare("INSERT INTO contas_receber (origem,venda_id,parcela_id,cliente_id,descricao,valor,valor_recebido,data_emissao,data_vencimento,data_recebimento,status,data_criacao,data_atualizacao) VALUES ('venda',?,?,?,?,?,?,?,?,?,?,?,?)")
+                   ->execute([$vid, $parc['parc_id'], $cli_id_cr, $desc_cr, (float)$parc['parc_val'], $val_rec, date('Y-m-d'), $parc['parc_venc'], $dt_rec, $status_cr, $now_cr, $now_cr]);
+            }
+
             $db->commit();
             resp(201,['success'=>true,'id'=>$vid,'total'=>$total]);
         } catch(Exception $e){$db->rollBack();resp(500,['error'=>$e->getMessage()]);}
@@ -1434,6 +1467,18 @@ if ($resource === 'nfe') {
                 $si->execute([$nfeId,$it['codigo_produto']??'',$it['descricao']??'',$it['ncm']??'',$it['cfop']??'',$it['unidade']??'UN',(float)($it['quantidade']??1),(float)($it['valor_unitario']??0),(float)($it['valor_total']??0),(float)($it['valor_icms']??0),(float)($it['valor_ipi']??0),(float)($it['valor_pis']??0),(float)($it['valor_cofins']??0)]);
             }
         }
+        // ── Gerar conta a pagar automaticamente ──────────────────────────
+        $valor_nfe = (float)($data['valor_total'] ?? 0);
+        if ($valor_nfe > 0) {
+            $forn_id_cp = $data['fornecedor_id'] ?? null;
+            $forn_nome_cp = $data['fornecedor_nome'] ?? 'Fornecedor';
+            $num_nfe_cp  = $data['numero'] ?? '';
+            $desc_cp = "NF-e #{$num_nfe_cp} — {$forn_nome_cp}";
+            $venc_cp = $data['data_vencimento_cp'] ?? $data['data_entrada'] ?? date('Y-m-d', strtotime('+30 days'));
+            $now_cp  = date('Y-m-d H:i:s');
+            $db->prepare("INSERT INTO contas_pagar (origem,nfe_id,fornecedor_id,descricao,valor,valor_pago,data_emissao,data_vencimento,status,documento_ref,data_criacao,data_atualizacao) VALUES ('nfe',?,?,?,?,0,?,?,'Aberta',?,?,?)")
+               ->execute([$nfeId, $forn_id_cp, $desc_cp, $valor_nfe, $data['data_emissao']??date('Y-m-d'), $venc_cp, "NF-e {$num_nfe_cp}", $now_cp, $now_cp]);
+        }
         resp(201,['success'=>true,'id'=>$nfeId]);
     }
     if ($method === 'PUT' && $id !== null) {
@@ -1596,6 +1641,420 @@ if ($resource === 'nfe_importar_xml' && $method === 'POST') {
     $result['avisos'] = $avisos;
     resp(200, $result);
 }
+
+// ════════════════════════════════════════════════════════════════════════════
+// ─── MÓDULO FINANCEIRO ───────────────────────────────────────────────────
+// ════════════════════════════════════════════════════════════════════════════
+
+// ─── CATEGORIAS FINANCEIRAS ──────────────────────────────────────────────
+if ($resource === 'categorias_financeiras') {
+    auth_required();
+    if ($method === 'GET') {
+        $tipo_f = $_GET['tipo'] ?? '';
+        if ($tipo_f && in_array($tipo_f, ['pagar','receber','ambos'])) {
+            $s = $db->prepare("SELECT * FROM categorias_financeiras WHERE (tipo=? OR tipo='ambos') AND ativo=1 ORDER BY nome");
+            $s->execute([$tipo_f]);
+        } else {
+            $s = $db->query("SELECT * FROM categorias_financeiras WHERE ativo=1 ORDER BY nome");
+        }
+        resp(200, $s->fetchAll());
+    }
+    if ($method === 'POST') {
+        $nome = trim($data['nome'] ?? ''); if (!$nome) resp(400, ['error' => 'Nome obrigatório']);
+        $db->prepare("INSERT INTO categorias_financeiras (nome,tipo,cor) VALUES (?,?,?)")
+           ->execute([$nome, $data['tipo'] ?? 'ambos', $data['cor'] ?? '#7d8590']);
+        resp(201, ['success' => true, 'id' => (int)$db->lastInsertId()]);
+    }
+    if ($method === 'PUT' && $id !== null) {
+        $db->prepare("UPDATE categorias_financeiras SET nome=?,tipo=?,cor=?,ativo=? WHERE id=?")
+           ->execute([trim($data['nome']??''), $data['tipo']??'ambos', $data['cor']??'#7d8590', (int)($data['ativo']??1), $id]);
+        resp(200, ['success' => true]);
+    }
+    if ($method === 'DELETE' && $id !== null) {
+        $db->prepare("UPDATE categorias_financeiras SET ativo=0 WHERE id=?")->execute([$id]);
+        resp(200, ['success' => true]);
+    }
+    resp(405, ['error' => 'Método não permitido']);
+}
+
+// ─── CONTAS A RECEBER ─────────────────────────────────────────────────────
+if ($resource === 'contas_receber') {
+    auth_required();
+
+    // ── GET lista ─────────────────────────────────────────────────────────
+    if ($method === 'GET' && $id === null) {
+        $page   = max(1,(int)($_GET['page']??1));
+        $limit  = max(1,min(100,(int)($_GET['limit']??30)));
+        $offset = ($page-1)*$limit;
+        $status_f = $_GET['status'] ?? '';
+        $q_raw    = $_GET['q']     ?? '';
+        $data_ini = $_GET['data_ini'] ?? '';
+        $data_fim = $_GET['data_fim'] ?? '';
+        $vencidas = $_GET['vencidas'] ?? '';
+
+        $where = ['1=1']; $params = [];
+        if ($status_f) { $where[] = 'cr.status=?'; $params[] = $status_f; }
+        if ($q_raw)    { $where[] = '(cr.descricao LIKE ? OR c.nome LIKE ? OR cr.documento_ref LIKE ?)'; $q = '%'.$q_raw.'%'; $params[] = $q; $params[] = $q; $params[] = $q; }
+        if ($data_ini) { $where[] = 'cr.data_vencimento >= ?'; $params[] = $data_ini; }
+        if ($data_fim) { $where[] = 'cr.data_vencimento <= ?'; $params[] = $data_fim; }
+        if ($vencidas === '1') { $where[] = "cr.data_vencimento < DATE('now') AND cr.status='Aberta'"; }
+        $w = implode(' AND ', $where);
+
+        $tc = $db->prepare("SELECT COUNT(*) FROM contas_receber cr LEFT JOIN clientes c ON cr.cliente_id=c.id WHERE $w");
+        $tc->execute($params); $total = (int)$tc->fetchColumn();
+
+        $s = $db->prepare("
+            SELECT cr.*,
+                   c.nome  AS cliente_nome,
+                   cf.nome AS categoria_nome, cf.cor AS categoria_cor,
+                   cb.nome AS conta_bancaria_nome
+            FROM contas_receber cr
+            LEFT JOIN clientes c          ON cr.cliente_id=c.id
+            LEFT JOIN categorias_financeiras cf ON cr.categoria_id=cf.id
+            LEFT JOIN contas_bancarias cb  ON cr.conta_bancaria_id=cb.id
+            WHERE $w
+            ORDER BY cr.data_vencimento ASC, cr.id DESC
+            LIMIT ? OFFSET ?
+        ");
+        $s->execute(array_merge($params, [$limit, $offset]));
+        $rows = $s->fetchAll();
+
+        // Totalizadores
+        $st = $db->prepare("SELECT
+            COALESCE(SUM(CASE WHEN status='Aberta' THEN valor ELSE 0 END),0) AS total_aberto,
+            COALESCE(SUM(CASE WHEN status='Recebida' THEN valor_recebido ELSE 0 END),0) AS total_recebido,
+            COALESCE(SUM(CASE WHEN status='Aberta' AND data_vencimento < DATE('now') THEN valor ELSE 0 END),0) AS total_vencido
+            FROM contas_receber cr LEFT JOIN clientes c ON cr.cliente_id=c.id WHERE $w");
+        $st->execute($params); $totais = $st->fetch();
+
+        resp(200, ['data'=>$rows,'total'=>$total,'page'=>$page,'pages'=>(int)ceil(max(1,$total)/$limit),'totais'=>$totais]);
+    }
+
+    // ── GET individual ────────────────────────────────────────────────────
+    if ($method === 'GET' && $id !== null) {
+        $s = $db->prepare("SELECT cr.*, c.nome AS cliente_nome, cf.nome AS categoria_nome FROM contas_receber cr LEFT JOIN clientes c ON cr.cliente_id=c.id LEFT JOIN categorias_financeiras cf ON cr.categoria_id=cf.id WHERE cr.id=?");
+        $s->execute([$id]); $r = $s->fetch();
+        resp($r ? 200 : 404, $r ?: ['error' => 'Não encontrado']);
+    }
+
+    // ── POST criar manual ─────────────────────────────────────────────────
+    if ($method === 'POST' && $action !== 'receber' && $action !== 'cancelar') {
+        $desc = trim($data['descricao'] ?? ''); if (!$desc) resp(400, ['error' => 'Descrição obrigatória']);
+        $valor = (float)($data['valor'] ?? 0); if ($valor <= 0) resp(400, ['error' => 'Valor deve ser maior que zero']);
+        $now = date('Y-m-d H:i:s');
+        $db->prepare("INSERT INTO contas_receber (origem,venda_id,parcela_id,cliente_id,categoria_id,conta_bancaria_id,descricao,valor,valor_recebido,data_emissao,data_vencimento,data_recebimento,status,documento_ref,observacoes,data_criacao,data_atualizacao) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)")
+           ->execute([
+                $data['origem']           ?? 'manual',
+                $data['venda_id']         ?? null,
+                $data['parcela_id']       ?? null,
+                $data['cliente_id']       ?? null,
+                $data['categoria_id']     ?? null,
+                $data['conta_bancaria_id']?? null,
+                $desc,
+                $valor,
+                (float)($data['valor_recebido'] ?? 0),
+                $data['data_emissao']     ?? date('Y-m-d'),
+                $data['data_vencimento']  ?? null,
+                $data['data_recebimento'] ?? null,
+                $data['status']           ?? 'Aberta',
+                $data['documento_ref']    ?? '',
+                $data['observacoes']      ?? '',
+                $now, $now
+           ]);
+        resp(201, ['success' => true, 'id' => (int)$db->lastInsertId()]);
+    }
+
+    // ── POST /contas_receber/{id}?action=receber — baixa do recebimento ───
+    if ($method === 'POST' && $action === 'receber' && $id !== null) {
+        $valor_rec = (float)($data['valor_recebido'] ?? 0);
+        $dt_rec    = $data['data_recebimento'] ?? date('Y-m-d');
+        $cb_id     = $data['conta_bancaria_id'] ?? null;
+        $s = $db->prepare("SELECT * FROM contas_receber WHERE id=?"); $s->execute([$id]); $cr = $s->fetch();
+        if (!$cr) resp(404, ['error' => 'Conta não encontrada']);
+        if ($cr['status'] === 'Cancelada') resp(400, ['error' => 'Conta cancelada não pode ser baixada']);
+        $novo_status = ($valor_rec >= $cr['valor']) ? 'Recebida' : 'Parcial';
+        $now = date('Y-m-d H:i:s');
+        $db->prepare("UPDATE contas_receber SET valor_recebido=?,data_recebimento=?,status=?,conta_bancaria_id=COALESCE(?,conta_bancaria_id),data_atualizacao=? WHERE id=?")
+           ->execute([$valor_rec, $dt_rec, $novo_status, $cb_id, $now, $id]);
+        resp(200, ['success' => true, 'status' => $novo_status]);
+    }
+
+    // ── POST /contas_receber/{id}?action=cancelar ─────────────────────────
+    if ($method === 'POST' && $action === 'cancelar' && $id !== null) {
+        $now = date('Y-m-d H:i:s');
+        $db->prepare("UPDATE contas_receber SET status='Cancelada',data_atualizacao=? WHERE id=?")->execute([$now, $id]);
+        resp(200, ['success' => true]);
+    }
+
+    // ── PUT editar ────────────────────────────────────────────────────────
+    if ($method === 'PUT' && $id !== null) {
+        $desc = trim($data['descricao'] ?? ''); if (!$desc) resp(400, ['error' => 'Descrição obrigatória']);
+        $now = date('Y-m-d H:i:s');
+        $db->prepare("UPDATE contas_receber SET cliente_id=?,categoria_id=?,conta_bancaria_id=?,descricao=?,valor=?,data_emissao=?,data_vencimento=?,documento_ref=?,observacoes=?,data_atualizacao=? WHERE id=?")
+           ->execute([
+                $data['cliente_id']       ?? null,
+                $data['categoria_id']     ?? null,
+                $data['conta_bancaria_id']?? null,
+                $desc,
+                (float)($data['valor'] ?? 0),
+                $data['data_emissao']     ?? null,
+                $data['data_vencimento']  ?? null,
+                $data['documento_ref']    ?? '',
+                $data['observacoes']      ?? '',
+                $now, $id
+           ]);
+        resp(200, ['success' => true]);
+    }
+
+    // ── DELETE ────────────────────────────────────────────────────────────
+    if ($method === 'DELETE' && $id !== null) {
+        $db->prepare("DELETE FROM contas_receber WHERE id=?")->execute([$id]);
+        resp(200, ['success' => true]);
+    }
+    resp(405, ['error' => 'Método não permitido']);
+}
+
+// ─── CONTAS A PAGAR ───────────────────────────────────────────────────────
+if ($resource === 'contas_pagar') {
+    auth_required();
+
+    // ── GET lista ─────────────────────────────────────────────────────────
+    if ($method === 'GET' && $id === null) {
+        $page   = max(1,(int)($_GET['page']??1));
+        $limit  = max(1,min(100,(int)($_GET['limit']??30)));
+        $offset = ($page-1)*$limit;
+        $status_f = $_GET['status'] ?? '';
+        $q_raw    = $_GET['q']     ?? '';
+        $data_ini = $_GET['data_ini'] ?? '';
+        $data_fim = $_GET['data_fim'] ?? '';
+        $vencidas = $_GET['vencidas'] ?? '';
+
+        $where = ['1=1']; $params = [];
+        if ($status_f) { $where[] = 'cp.status=?'; $params[] = $status_f; }
+        if ($q_raw)    { $where[] = '(cp.descricao LIKE ? OR f.razao_social LIKE ? OR cp.documento_ref LIKE ?)'; $q = '%'.$q_raw.'%'; $params[] = $q; $params[] = $q; $params[] = $q; }
+        if ($data_ini) { $where[] = 'cp.data_vencimento >= ?'; $params[] = $data_ini; }
+        if ($data_fim) { $where[] = 'cp.data_vencimento <= ?'; $params[] = $data_fim; }
+        if ($vencidas === '1') { $where[] = "cp.data_vencimento < DATE('now') AND cp.status='Aberta'"; }
+        $w = implode(' AND ', $where);
+
+        $tc = $db->prepare("SELECT COUNT(*) FROM contas_pagar cp LEFT JOIN fornecedores f ON cp.fornecedor_id=f.id WHERE $w");
+        $tc->execute($params); $total = (int)$tc->fetchColumn();
+
+        $s = $db->prepare("
+            SELECT cp.*,
+                   f.razao_social AS fornecedor_nome,
+                   cf.nome AS categoria_nome, cf.cor AS categoria_cor,
+                   cb.nome AS conta_bancaria_nome
+            FROM contas_pagar cp
+            LEFT JOIN fornecedores f               ON cp.fornecedor_id=f.id
+            LEFT JOIN categorias_financeiras cf    ON cp.categoria_id=cf.id
+            LEFT JOIN contas_bancarias cb          ON cp.conta_bancaria_id=cb.id
+            WHERE $w
+            ORDER BY cp.data_vencimento ASC, cp.id DESC
+            LIMIT ? OFFSET ?
+        ");
+        $s->execute(array_merge($params, [$limit, $offset]));
+        $rows = $s->fetchAll();
+
+        // Totalizadores
+        $st = $db->prepare("SELECT
+            COALESCE(SUM(CASE WHEN status='Aberta' THEN valor ELSE 0 END),0) AS total_aberto,
+            COALESCE(SUM(CASE WHEN status='Paga' THEN valor_pago ELSE 0 END),0) AS total_pago,
+            COALESCE(SUM(CASE WHEN status='Aberta' AND data_vencimento < DATE('now') THEN valor ELSE 0 END),0) AS total_vencido
+            FROM contas_pagar cp LEFT JOIN fornecedores f ON cp.fornecedor_id=f.id WHERE $w");
+        $st->execute($params); $totais = $st->fetch();
+
+        resp(200, ['data'=>$rows,'total'=>$total,'page'=>$page,'pages'=>(int)ceil(max(1,$total)/$limit),'totais'=>$totais]);
+    }
+
+    // ── GET individual ────────────────────────────────────────────────────
+    if ($method === 'GET' && $id !== null) {
+        $s = $db->prepare("SELECT cp.*, f.razao_social AS fornecedor_nome, cf.nome AS categoria_nome FROM contas_pagar cp LEFT JOIN fornecedores f ON cp.fornecedor_id=f.id LEFT JOIN categorias_financeiras cf ON cp.categoria_id=cf.id WHERE cp.id=?");
+        $s->execute([$id]); $r = $s->fetch();
+        resp($r ? 200 : 404, $r ?: ['error' => 'Não encontrado']);
+    }
+
+    // ── POST criar manual ─────────────────────────────────────────────────
+    if ($method === 'POST' && $action !== 'pagar' && $action !== 'cancelar') {
+        $desc = trim($data['descricao'] ?? ''); if (!$desc) resp(400, ['error' => 'Descrição obrigatória']);
+        $valor = (float)($data['valor'] ?? 0); if ($valor <= 0) resp(400, ['error' => 'Valor deve ser maior que zero']);
+        $now = date('Y-m-d H:i:s');
+        $db->prepare("INSERT INTO contas_pagar (origem,nfe_id,fornecedor_id,categoria_id,conta_bancaria_id,descricao,valor,valor_pago,data_emissao,data_vencimento,data_pagamento,status,documento_ref,observacoes,data_criacao,data_atualizacao) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)")
+           ->execute([
+                $data['origem']           ?? 'manual',
+                $data['nfe_id']           ?? null,
+                $data['fornecedor_id']    ?? null,
+                $data['categoria_id']     ?? null,
+                $data['conta_bancaria_id']?? null,
+                $desc,
+                $valor,
+                (float)($data['valor_pago'] ?? 0),
+                $data['data_emissao']     ?? date('Y-m-d'),
+                $data['data_vencimento']  ?? null,
+                $data['data_pagamento']   ?? null,
+                $data['status']           ?? 'Aberta',
+                $data['documento_ref']    ?? '',
+                $data['observacoes']      ?? '',
+                $now, $now
+           ]);
+        resp(201, ['success' => true, 'id' => (int)$db->lastInsertId()]);
+    }
+
+    // ── POST /contas_pagar/{id}?action=pagar — baixa do pagamento ─────────
+    if ($method === 'POST' && $action === 'pagar' && $id !== null) {
+        $valor_pago = (float)($data['valor_pago'] ?? 0);
+        $dt_pag     = $data['data_pagamento'] ?? date('Y-m-d');
+        $cb_id      = $data['conta_bancaria_id'] ?? null;
+        $s = $db->prepare("SELECT * FROM contas_pagar WHERE id=?"); $s->execute([$id]); $cp = $s->fetch();
+        if (!$cp) resp(404, ['error' => 'Conta não encontrada']);
+        if ($cp['status'] === 'Cancelada') resp(400, ['error' => 'Conta cancelada não pode ser baixada']);
+        $novo_status = ($valor_pago >= $cp['valor']) ? 'Paga' : 'Parcial';
+        $now = date('Y-m-d H:i:s');
+        $db->prepare("UPDATE contas_pagar SET valor_pago=?,data_pagamento=?,status=?,conta_bancaria_id=COALESCE(?,conta_bancaria_id),data_atualizacao=? WHERE id=?")
+           ->execute([$valor_pago, $dt_pag, $novo_status, $cb_id, $now, $id]);
+        resp(200, ['success' => true, 'status' => $novo_status]);
+    }
+
+    // ── POST /contas_pagar/{id}?action=cancelar ───────────────────────────
+    if ($method === 'POST' && $action === 'cancelar' && $id !== null) {
+        $now = date('Y-m-d H:i:s');
+        $db->prepare("UPDATE contas_pagar SET status='Cancelada',data_atualizacao=? WHERE id=?")->execute([$now, $id]);
+        resp(200, ['success' => true]);
+    }
+
+    // ── PUT editar ────────────────────────────────────────────────────────
+    if ($method === 'PUT' && $id !== null) {
+        $desc = trim($data['descricao'] ?? ''); if (!$desc) resp(400, ['error' => 'Descrição obrigatória']);
+        $now = date('Y-m-d H:i:s');
+        $db->prepare("UPDATE contas_pagar SET fornecedor_id=?,categoria_id=?,conta_bancaria_id=?,descricao=?,valor=?,data_emissao=?,data_vencimento=?,documento_ref=?,observacoes=?,data_atualizacao=? WHERE id=?")
+           ->execute([
+                $data['fornecedor_id']    ?? null,
+                $data['categoria_id']     ?? null,
+                $data['conta_bancaria_id']?? null,
+                $desc,
+                (float)($data['valor'] ?? 0),
+                $data['data_emissao']     ?? null,
+                $data['data_vencimento']  ?? null,
+                $data['documento_ref']    ?? '',
+                $data['observacoes']      ?? '',
+                $now, $id
+           ]);
+        resp(200, ['success' => true]);
+    }
+
+    // ── DELETE ────────────────────────────────────────────────────────────
+    if ($method === 'DELETE' && $id !== null) {
+        $db->prepare("DELETE FROM contas_pagar WHERE id=?")->execute([$id]);
+        resp(200, ['success' => true]);
+    }
+    resp(405, ['error' => 'Método não permitido']);
+}
+
+// ─── FLUXO DE CAIXA ───────────────────────────────────────────────────────
+if ($resource === 'fluxo_caixa') {
+    auth_required();
+    $periodo  = $_GET['periodo']  ?? 'mes';
+    $data_ini = $_GET['data_ini'] ?? null;
+    $data_fim = $_GET['data_fim'] ?? null;
+    switch ($periodo) {
+        case 'semana': $data_ini = date('Y-m-d', strtotime('monday this week')); $data_fim = date('Y-m-d'); break;
+        case 'mes':    $data_ini = date('Y-m-01'); $data_fim = date('Y-m-t'); break;
+        case 'trimestre': $data_ini = date('Y-m-01', strtotime('-2 months')); $data_fim = date('Y-m-t'); break;
+        case 'ano':    $data_ini = date('Y-01-01'); $data_fim = date('Y-12-31'); break;
+        default: if (!$data_ini) $data_ini = date('Y-m-01'); if (!$data_fim) $data_fim = date('Y-m-t');
+    }
+
+    // Entradas por dia (contas recebidas)
+    $se = $db->prepare("
+        SELECT DATE(data_recebimento) AS dia,
+               COALESCE(SUM(valor_recebido),0) AS total
+        FROM contas_receber
+        WHERE status IN ('Recebida','Parcial')
+          AND data_recebimento BETWEEN ? AND ?
+        GROUP BY dia ORDER BY dia
+    ");
+    $se->execute([$data_ini, $data_fim]);
+    $entradas_por_dia = [];
+    foreach ($se->fetchAll() as $r) $entradas_por_dia[$r['dia']] = (float)$r['total'];
+
+    // Saídas por dia (contas pagas)
+    $ss = $db->prepare("
+        SELECT DATE(data_pagamento) AS dia,
+               COALESCE(SUM(valor_pago),0) AS total
+        FROM contas_pagar
+        WHERE status IN ('Paga','Parcial')
+          AND data_pagamento BETWEEN ? AND ?
+        GROUP BY dia ORDER BY dia
+    ");
+    $ss->execute([$data_ini, $data_fim]);
+    $saidas_por_dia = [];
+    foreach ($ss->fetchAll() as $r) $saidas_por_dia[$r['dia']] = (float)$r['total'];
+
+    // Montar série de dias completa
+    $dias = []; $dt = new DateTime($data_ini); $dtFim = new DateTime($data_fim);
+    while ($dt <= $dtFim) { $dias[] = $dt->format('Y-m-d'); $dt->modify('+1 day'); }
+
+    $serie = [];
+    $saldo_acumulado = 0;
+    foreach ($dias as $dia) {
+        $e = $entradas_por_dia[$dia] ?? 0;
+        $s2 = $saidas_por_dia[$dia] ?? 0;
+        $saldo_acumulado += $e - $s2;
+        $serie[] = ['dia' => $dia, 'entradas' => $e, 'saidas' => $s2, 'saldo' => round($saldo_acumulado, 2)];
+    }
+
+    // Totais gerais do período
+    $te = $db->prepare("SELECT COALESCE(SUM(valor_recebido),0) FROM contas_receber WHERE status IN ('Recebida','Parcial') AND data_recebimento BETWEEN ? AND ?");
+    $te->execute([$data_ini, $data_fim]); $total_entradas = (float)$te->fetchColumn();
+
+    $ts = $db->prepare("SELECT COALESCE(SUM(valor_pago),0) FROM contas_pagar WHERE status IN ('Paga','Parcial') AND data_pagamento BETWEEN ? AND ?");
+    $ts->execute([$data_ini, $data_fim]); $total_saidas = (float)$ts->fetchColumn();
+
+    // A vencer no período (abertos)
+    $tv_e = $db->prepare("SELECT COALESCE(SUM(valor),0) FROM contas_receber WHERE status='Aberta' AND data_vencimento BETWEEN ? AND ?");
+    $tv_e->execute([$data_ini, $data_fim]); $previsto_entradas = (float)$tv_e->fetchColumn();
+
+    $tv_s = $db->prepare("SELECT COALESCE(SUM(valor),0) FROM contas_pagar WHERE status='Aberta' AND data_vencimento BETWEEN ? AND ?");
+    $tv_s->execute([$data_ini, $data_fim]); $previsto_saidas = (float)$tv_s->fetchColumn();
+
+    // Entradas por categoria
+    $sc = $db->prepare("
+        SELECT COALESCE(cf.nome,'Sem categoria') AS categoria, cf.cor,
+               COALESCE(SUM(cr.valor_recebido),0) AS total
+        FROM contas_receber cr
+        LEFT JOIN categorias_financeiras cf ON cr.categoria_id=cf.id
+        WHERE cr.status IN ('Recebida','Parcial') AND cr.data_recebimento BETWEEN ? AND ?
+        GROUP BY cr.categoria_id ORDER BY total DESC
+    ");
+    $sc->execute([$data_ini, $data_fim]); $por_categoria_entrada = $sc->fetchAll();
+
+    // Saídas por categoria
+    $sc2 = $db->prepare("
+        SELECT COALESCE(cf.nome,'Sem categoria') AS categoria, cf.cor,
+               COALESCE(SUM(cp.valor_pago),0) AS total
+        FROM contas_pagar cp
+        LEFT JOIN categorias_financeiras cf ON cp.categoria_id=cf.id
+        WHERE cp.status IN ('Paga','Parcial') AND cp.data_pagamento BETWEEN ? AND ?
+        GROUP BY cp.categoria_id ORDER BY total DESC
+    ");
+    $sc2->execute([$data_ini, $data_fim]); $por_categoria_saida = $sc2->fetchAll();
+
+    resp(200, [
+        'periodo'            => ['inicio' => $data_ini, 'fim' => $data_fim],
+        'total_entradas'     => $total_entradas,
+        'total_saidas'       => $total_saidas,
+        'saldo_periodo'      => round($total_entradas - $total_saidas, 2),
+        'previsto_entradas'  => $previsto_entradas,
+        'previsto_saidas'    => $previsto_saidas,
+        'serie'              => $serie,
+        'por_categoria_entrada' => $por_categoria_entrada,
+        'por_categoria_saida'   => $por_categoria_saida,
+    ]);
+}
+
+// ════════════════════════════════════════════════════════════════════════════
+// ─── FIM DO MÓDULO FINANCEIRO ─────────────────────────────────────────────
+// ════════════════════════════════════════════════════════════════════════════
 
 if ($resource === 'tabelas_servico') {
     auth_required();

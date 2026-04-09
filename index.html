@@ -611,6 +611,14 @@ select option{background:var(--surface2)}
               <svg class="nav-subgroup-arrow" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><polyline points="9 18 15 12 9 6"/></svg>
             </div>
             <div class="nav-subgroup-items">
+          <div class="nav-item subsub" data-page="financeiro" onclick="nav('financeiro')">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="12" y1="1" x2="12" y2="23"/><path d="M17 5H9.5a3.5 3.5 0 000 7h5a3.5 3.5 0 010 7H6"/></svg>
+            <span class="label">Contas / Fluxo de Caixa</span>
+          </div>
+          <div class="nav-item subsub" data-page="categorias_financeiras" onclick="nav('categorias_financeiras')">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M20.59 13.41l-7.17 7.17a2 2 0 01-2.83 0L2 12V2h10l8.59 8.59a2 2 0 010 2.82z"/><line x1="7" y1="7" x2="7.01" y2="7"/></svg>
+            <span class="label">Categorias Financeiras</span>
+          </div>
           <div class="nav-item subsub" data-page="formas_pagamento" onclick="nav('formas_pagamento')">
             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="1" y="4" width="22" height="16" rx="2"/><line x1="1" y1="10" x2="23" y2="10"/></svg>
             <span class="label">Formas de Pagamento</span>
@@ -716,6 +724,60 @@ select option{background:var(--surface2)}
   <video id="lightbox-video" src="" controls style="max-width:90vw;max-height:90vh;border-radius:var(--radius);display:none"></video>
   <div id="lightbox-comment" style="position:fixed;bottom:24px;left:50%;transform:translateX(-50%);background:rgba(0,0,0,.7);color:#fff;padding:8px 16px;border-radius:20px;font-size:13px;display:none"></div>
 </div>
+
+<style>
+/* ════════════════════════════════════════════════
+   MÓDULO FINANCEIRO
+════════════════════════════════════════════════ */
+.fin-tabs{display:flex;gap:2px;border-bottom:2px solid var(--border);margin-bottom:20px;}
+.fin-tab{padding:10px 20px;cursor:pointer;font-weight:600;font-size:13px;border-bottom:2px solid transparent;margin-bottom:-2px;color:var(--muted);transition:color .15s,border-color .15s;}
+.fin-tab.active{color:var(--accent);border-bottom-color:var(--accent);}
+.fin-tab:hover:not(.active){color:var(--text);}
+
+.fin-cards{display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:12px;margin-bottom:20px;}
+.fin-card{background:var(--surface);border:1px solid var(--border);border-radius:var(--radius);padding:16px 18px;}
+.fin-card .fc-label{font-size:11px;font-weight:600;color:var(--muted);text-transform:uppercase;letter-spacing:.05em;margin-bottom:4px;}
+.fin-card .fc-value{font-family:var(--font-head);font-size:22px;font-weight:700;}
+.fin-card .fc-value.green{color:var(--success);}
+.fin-card .fc-value.red{color:var(--danger);}
+.fin-card .fc-value.warn{color:var(--warn);}
+.fin-card .fc-value.blue{color:var(--info);}
+.fin-card .fc-sub{font-size:11px;color:var(--muted);margin-top:3px;}
+
+.fin-filters{display:flex;gap:8px;flex-wrap:wrap;margin-bottom:16px;align-items:center;}
+.fin-filters input,.fin-filters select{padding:7px 10px;background:var(--surface);border:1px solid var(--border);border-radius:var(--radius);color:var(--text);font-size:13px;}
+.fin-filters input:focus,.fin-filters select:focus{outline:none;border-color:var(--accent);}
+
+.fin-table{width:100%;border-collapse:collapse;font-size:13px;}
+.fin-table th{text-align:left;padding:8px 10px;font-size:11px;font-weight:600;color:var(--muted);text-transform:uppercase;letter-spacing:.04em;border-bottom:1px solid var(--border);}
+.fin-table td{padding:10px 10px;border-bottom:1px solid var(--border);vertical-align:middle;}
+.fin-table tr:hover td{background:var(--surface2);}
+.fin-table .val{font-family:var(--font-head);font-weight:700;}
+.fin-table .val.green{color:var(--success);}
+.fin-table .val.red{color:var(--danger);}
+
+.badge-fin{display:inline-block;padding:2px 8px;border-radius:20px;font-size:11px;font-weight:600;}
+.badge-fin.aberta{background:rgba(96,165,250,.15);color:var(--info);}
+.badge-fin.recebida,.badge-fin.paga{background:rgba(52,211,153,.15);color:var(--success);}
+.badge-fin.vencida{background:rgba(248,113,113,.15);color:var(--danger);}
+.badge-fin.parcial{background:rgba(251,191,36,.15);color:var(--warn);}
+.badge-fin.cancelada{background:rgba(125,133,144,.15);color:var(--muted);}
+
+/* Fluxo de caixa */
+.fluxo-chart-wrap{background:var(--surface);border:1px solid var(--border);border-radius:var(--radius);padding:16px;margin-bottom:20px;}
+.fluxo-chart-title{font-family:var(--font-head);font-weight:700;font-size:14px;margin-bottom:14px;}
+.fluxo-chart-svg{width:100%;overflow:visible;}
+
+.fluxo-pie-row{display:grid;grid-template-columns:1fr 1fr;gap:16px;margin-bottom:20px;}
+.fluxo-pie-box{background:var(--surface);border:1px solid var(--border);border-radius:var(--radius);padding:16px;}
+.fluxo-pie-title{font-family:var(--font-head);font-weight:700;font-size:13px;margin-bottom:12px;}
+.cat-list{display:flex;flex-direction:column;gap:6px;}
+.cat-row{display:flex;align-items:center;gap:8px;font-size:12px;}
+.cat-dot{width:10px;height:10px;border-radius:50%;flex-shrink:0;}
+.cat-bar-wrap{flex:1;height:6px;background:var(--border);border-radius:3px;overflow:hidden;}
+.cat-bar{height:100%;border-radius:3px;transition:width .4s;}
+.cat-val{font-weight:700;font-family:var(--font-head);font-size:12px;white-space:nowrap;}
+</style>
 
 <script>
 // ════════════════════════════════════
@@ -6725,6 +6787,577 @@ async function submitForm(resource,id){
     } else { nav(currentPage); }
   }catch(e){toast(e.message,'error');}
 }
+
+// ════════════════════════════════════════════════════════════════
+// MÓDULO FINANCEIRO — Contas a Receber / Pagar / Fluxo de Caixa
+// ════════════════════════════════════════════════════════════════
+
+const _fin = {
+  aba: 'receber',
+  rec: { page:1, status:'', q:'', data_ini:'', data_fim:'', vencidas:false, dados:[], total:0, pages:1, totais:{} },
+  pag: { page:1, status:'', q:'', data_ini:'', data_fim:'', vencidas:false, dados:[], total:0, pages:1, totais:{} },
+  flu: { periodo:'mes', data_ini:'', data_fim:'', dados:null },
+  categorias: [],
+  contas_bancarias: [],
+};
+
+function fmtBRLFin(v){ return 'R$ '+(+v||0).toLocaleString('pt-BR',{minimumFractionDigits:2,maximumFractionDigits:2}); }
+function fmtDateBR(d){ if(!d) return '\u2014'; const p=d.substring(0,10).split('-'); return p[2]+'/'+p[1]+'/'+p[0]; }
+function diasVencimento(row) {
+  if (!row.data_vencimento || row.status !== 'Aberta') return '';
+  const hoje = new Date(); hoje.setHours(0,0,0,0);
+  const venc = new Date(row.data_vencimento+'T00:00:00');
+  const diff  = Math.round((venc-hoje)/(1000*60*60*24));
+  if (diff < 0) return '<span style="color:var(--danger);font-size:11px">'+Math.abs(diff)+'d atraso</span>';
+  if (diff === 0) return '<span style="color:var(--warn);font-size:11px">Vence hoje</span>';
+  if (diff <= 7)  return '<span style="color:var(--warn);font-size:11px">Em '+diff+'d</span>';
+  return '<span style="color:var(--muted);font-size:11px">Em '+diff+'d</span>';
+}
+function badgeFin(row) {
+  const s = row.status;
+  const vencida = s==='Aberta' && row.data_vencimento && row.data_vencimento < new Date().toISOString().substring(0,10);
+  if (vencida) return '<span class="badge-fin vencida">Vencida</span>';
+  const cls = {Aberta:'aberta',Recebida:'recebida',Paga:'paga',Parcial:'parcial',Cancelada:'cancelada'}[s]||'aberta';
+  return '<span class="badge-fin '+cls+'">'+s+'</span>';
+}
+
+async function renderFinanceiro() {
+  document.querySelector('.page-title').textContent = 'Financeiro';
+  try {
+    const [cats, cbs] = await Promise.all([api('categorias_financeiras'), api('contas_bancarias')]);
+    _fin.categorias = cats || [];
+    _fin.contas_bancarias = cbs || [];
+  } catch(e) {}
+  const el = document.getElementById('content');
+  el.innerHTML = '<div style="padding:20px">'
+    +'<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:18px">'
+    +'<h2 style="font-family:var(--font-head);font-weight:800;font-size:20px">Financeiro</h2>'
+    +'<button class="btn btn-primary btn-sm" id="fin-btn-novo">+ Novo Lançamento</button>'
+    +'</div>'
+    +'<div class="fin-tabs">'
+    +'<div class="fin-tab active" id="fin-tab-receber" onclick="finSetAba(\'receber\')">💰 A Receber</div>'
+    +'<div class="fin-tab" id="fin-tab-pagar" onclick="finSetAba(\'pagar\')">📤 A Pagar</div>'
+    +'<div class="fin-tab" id="fin-tab-fluxo" onclick="finSetAba(\'fluxo\')">📊 Fluxo de Caixa</div>'
+    +'</div>'
+    +'<div id="fin-conteudo"></div>'
+    +'</div>';
+  document.getElementById('fin-btn-novo').onclick = function(){ finModalLancamento(_fin.aba === 'pagar' ? 'pagar' : 'receber'); };
+  _fin.aba = 'receber';
+  await finRenderAba();
+}
+
+async function finSetAba(aba) {
+  _fin.aba = aba;
+  ['receber','pagar','fluxo'].forEach(function(a) {
+    var t = document.getElementById('fin-tab-'+a);
+    if(t) t.classList.toggle('active', a===aba);
+  });
+  var btn = document.getElementById('fin-btn-novo');
+  if (btn) btn.style.display = aba==='fluxo' ? 'none' : '';
+  await finRenderAba();
+}
+
+async function finRenderAba() {
+  var wrap = document.getElementById('fin-conteudo');
+  if (!wrap) return;
+  if (_fin.aba==='receber') await finRenderReceber(wrap);
+  else if (_fin.aba==='pagar') await finRenderPagar(wrap);
+  else await finRenderFluxo(wrap);
+}
+
+function _finCardsReceber(t) {
+  return '<div class="fin-cards">'
+    +'<div class="fin-card"><div class="fc-label">Em Aberto</div><div class="fc-value blue">'+fmtBRLFin(t.total_aberto)+'</div></div>'
+    +'<div class="fin-card"><div class="fc-label">Recebido</div><div class="fc-value green">'+fmtBRLFin(t.total_recebido)+'</div></div>'
+    +'<div class="fin-card"><div class="fc-label">Vencido</div><div class="fc-value red">'+fmtBRLFin(t.total_vencido)+'</div><div class="fc-sub">Passou do vencimento</div></div>'
+    +'</div>';
+}
+function _finCardsPagar(t) {
+  return '<div class="fin-cards">'
+    +'<div class="fin-card"><div class="fc-label">Em Aberto</div><div class="fc-value red">'+fmtBRLFin(t.total_aberto)+'</div></div>'
+    +'<div class="fin-card"><div class="fc-label">Pago</div><div class="fc-value green">'+fmtBRLFin(t.total_pago)+'</div></div>'
+    +'<div class="fin-card"><div class="fc-label">Vencido</div><div class="fc-value warn">'+fmtBRLFin(t.total_vencido)+'</div><div class="fc-sub">Passou do vencimento</div></div>'
+    +'</div>';
+}
+
+function _finFiltros(st, key, labels) {
+  return '<div class="fin-filters">'
+    +'<input type="text" placeholder="'+labels.busca+'" value="'+escHtml(st.q)+'" oninput="_fin.'+key+'.q=this.value;_fin.'+key+'.page=1" onkeydown="if(event.key===\'Enter\')finRenderAba()" style="min-width:220px"/>'
+    +'<select onchange="_fin.'+key+'.status=this.value;_fin.'+key+'.page=1;finRenderAba()">'
+    +'<option value="">Todos os status</option>'
+    +'<option value="Aberta" '+(st.status==='Aberta'?'selected':'')+'>Aberto</option>'
+    +'<option value="'+labels.pago+'" '+(st.status===labels.pago?'selected':'')+'>'+labels.pagoLabel+'</option>'
+    +'<option value="Parcial" '+(st.status==='Parcial'?'selected':'')+'>Parcial</option>'
+    +'<option value="Cancelada" '+(st.status==='Cancelada'?'selected':'')+'>Cancelado</option>'
+    +'</select>'
+    +'<input type="date" value="'+st.data_ini+'" title="De" onchange="_fin.'+key+'.data_ini=this.value;_fin.'+key+'.page=1;finRenderAba()"/>'
+    +'<input type="date" value="'+st.data_fim+'" title="Até" onchange="_fin.'+key+'.data_fim=this.value;_fin.'+key+'.page=1;finRenderAba()"/>'
+    +'<label style="display:flex;align-items:center;gap:5px;font-size:13px;cursor:pointer">'
+    +'<input type="checkbox" '+(st.vencidas?'checked':'')+' onchange="_fin.'+key+'.vencidas=this.checked;_fin.'+key+'.page=1;finRenderAba()"/> Só vencidas'
+    +'</label>'
+    +'<button class="btn btn-ghost btn-sm" onclick="_fin.'+key+'.q=\'\';_fin.'+key+'.status=\'\';_fin.'+key+'.data_ini=\'\';_fin.'+key+'.data_fim=\'\';_fin.'+key+'.vencidas=false;_fin.'+key+'.page=1;finRenderAba()">Limpar</button>'
+    +'<button class="btn btn-ghost btn-sm" onclick="finRenderAba()">🔍 Buscar</button>'
+    +'</div>';
+}
+
+async function finRenderReceber(wrap) {
+  var st = _fin.rec;
+  try {
+    var params = {page:st.page,limit:30,status:st.status,q:st.q,data_ini:st.data_ini,data_fim:st.data_fim};
+    if (st.vencidas) params.vencidas='1';
+    var res = await api('contas_receber','','GET',null,params);
+    st.dados=res.data||[]; st.total=res.total||0; st.pages=res.pages||1; st.totais=res.totais||{};
+  } catch(e){ wrap.innerHTML='<p style="color:var(--danger)">'+e.message+'</p>'; return; }
+
+  var rows = st.dados.length===0
+    ? '<tr><td colspan="9" style="text-align:center;padding:30px;color:var(--muted)">Nenhum lançamento encontrado</td></tr>'
+    : st.dados.map(function(r){
+        return '<tr>'
+          +'<td style="color:var(--muted);font-size:12px">'+r.id+'</td>'
+          +'<td><div style="font-weight:600">'+escHtml(r.descricao)+'</div>'
+          +(r.documento_ref?'<div style="font-size:11px;color:var(--muted)">'+escHtml(r.documento_ref)+'</div>':'')
+          +(r.origem!=='manual'?'<span style="font-size:10px;background:var(--surface2);padding:1px 5px;border-radius:4px;color:var(--muted)">'+escHtml(r.origem)+'</span>':'')
+          +'</td>'
+          +'<td>'+escHtml(r.cliente_nome||'\u2014')+'</td>'
+          +'<td>'+(r.categoria_nome?'<span style="display:inline-flex;align-items:center;gap:4px"><span style="width:8px;height:8px;border-radius:50%;background:'+escHtml(r.categoria_cor||'#7d8590')+';flex-shrink:0"></span>'+escHtml(r.categoria_nome)+'</span>':'\u2014')+'</td>'
+          +'<td>'+fmtDateBR(r.data_vencimento)+'<br>'+diasVencimento(r)+'</td>'
+          +'<td class="val">'+fmtBRLFin(r.valor)+'</td>'
+          +'<td class="val green">'+(r.valor_recebido>0?fmtBRLFin(r.valor_recebido):'\u2014')+'</td>'
+          +'<td>'+badgeFin(r)+'</td>'
+          +'<td style="white-space:nowrap">'
+          +(r.status==='Aberta'||r.status==='Parcial'?'<button class="btn btn-ghost btn-sm" onclick="finModalReceber('+r.id+','+r.valor+','+(r.valor_recebido||0)+')" title="Registrar recebimento">✅</button>':'')
+          +'<button class="btn btn-ghost btn-sm" onclick="finModalEditarCR('+r.id+')" title="Editar">✏️</button>'
+          +(r.status!=='Cancelada'&&r.status!=='Recebida'?'<button class="btn btn-ghost btn-sm" onclick="finCancelarCR('+r.id+')" title="Cancelar" style="color:var(--danger)">✕</button>':'')
+          +'</td></tr>';
+      }).join('');
+
+  wrap.innerHTML = _finCardsReceber(st.totais)
+    + _finFiltros(st,'rec',{busca:'Buscar cliente, descrição...',pago:'Recebida',pagoLabel:'Recebido'})
+    + '<div style="overflow-x:auto"><table class="fin-table"><thead><tr>'
+    + '<th>#</th><th>Descrição</th><th>Cliente</th><th>Categoria</th><th>Vencimento</th><th>Valor</th><th>Recebido</th><th>Status</th><th></th>'
+    + '</tr></thead><tbody>'+rows+'</tbody></table></div>'
+    + finPaginacao(st.page,st.pages,'rec');
+}
+
+async function finRenderPagar(wrap) {
+  var st = _fin.pag;
+  try {
+    var params = {page:st.page,limit:30,status:st.status,q:st.q,data_ini:st.data_ini,data_fim:st.data_fim};
+    if (st.vencidas) params.vencidas='1';
+    var res = await api('contas_pagar','','GET',null,params);
+    st.dados=res.data||[]; st.total=res.total||0; st.pages=res.pages||1; st.totais=res.totais||{};
+  } catch(e){ wrap.innerHTML='<p style="color:var(--danger)">'+e.message+'</p>'; return; }
+
+  var rows = st.dados.length===0
+    ? '<tr><td colspan="9" style="text-align:center;padding:30px;color:var(--muted)">Nenhum lançamento encontrado</td></tr>'
+    : st.dados.map(function(r){
+        return '<tr>'
+          +'<td style="color:var(--muted);font-size:12px">'+r.id+'</td>'
+          +'<td><div style="font-weight:600">'+escHtml(r.descricao)+'</div>'
+          +(r.documento_ref?'<div style="font-size:11px;color:var(--muted)">'+escHtml(r.documento_ref)+'</div>':'')
+          +(r.origem!=='manual'?'<span style="font-size:10px;background:var(--surface2);padding:1px 5px;border-radius:4px;color:var(--muted)">'+escHtml(r.origem)+'</span>':'')
+          +'</td>'
+          +'<td>'+escHtml(r.fornecedor_nome||'\u2014')+'</td>'
+          +'<td>'+(r.categoria_nome?'<span style="display:inline-flex;align-items:center;gap:4px"><span style="width:8px;height:8px;border-radius:50%;background:'+escHtml(r.categoria_cor||'#7d8590')+';flex-shrink:0"></span>'+escHtml(r.categoria_nome)+'</span>':'\u2014')+'</td>'
+          +'<td>'+fmtDateBR(r.data_vencimento)+'<br>'+diasVencimento(r)+'</td>'
+          +'<td class="val red">'+fmtBRLFin(r.valor)+'</td>'
+          +'<td class="val green">'+(r.valor_pago>0?fmtBRLFin(r.valor_pago):'\u2014')+'</td>'
+          +'<td>'+badgeFin(r)+'</td>'
+          +'<td style="white-space:nowrap">'
+          +(r.status==='Aberta'||r.status==='Parcial'?'<button class="btn btn-ghost btn-sm" onclick="finModalPagar('+r.id+','+r.valor+','+(r.valor_pago||0)+')" title="Registrar pagamento">✅</button>':'')
+          +'<button class="btn btn-ghost btn-sm" onclick="finModalEditarCP('+r.id+')" title="Editar">✏️</button>'
+          +(r.status!=='Cancelada'&&r.status!=='Paga'?'<button class="btn btn-ghost btn-sm" onclick="finCancelarCP('+r.id+')" title="Cancelar" style="color:var(--danger)">✕</button>':'')
+          +'</td></tr>';
+      }).join('');
+
+  wrap.innerHTML = _finCardsPagar(st.totais)
+    + _finFiltros(st,'pag',{busca:'Buscar fornecedor, descrição...',pago:'Paga',pagoLabel:'Pago'})
+    + '<div style="overflow-x:auto"><table class="fin-table"><thead><tr>'
+    + '<th>#</th><th>Descrição</th><th>Fornecedor</th><th>Categoria</th><th>Vencimento</th><th>Valor</th><th>Pago</th><th>Status</th><th></th>'
+    + '</tr></thead><tbody>'+rows+'</tbody></table></div>'
+    + finPaginacao(st.page,st.pages,'pag');
+}
+
+function finPaginacao(page,pages,key) {
+  if(pages<=1) return '';
+  var btns='';
+  for(var i=1;i<=pages;i++) btns+='<button class="btn btn-sm '+(i===page?'btn-primary':'btn-ghost')+'" onclick="_fin.'+key+'.page='+i+';finRenderAba()">'+i+'</button>';
+  return '<div style="display:flex;gap:4px;justify-content:center;margin-top:16px">'+btns+'</div>';
+}
+
+async function finRenderFluxo(wrap) {
+  var st=_fin.flu, d;
+  try {
+    var params={periodo:st.periodo};
+    if(st.periodo==='custom'){params.data_ini=st.data_ini;params.data_fim=st.data_fim;}
+    d=await api('fluxo_caixa','','GET',null,params); st.dados=d;
+  } catch(e){ wrap.innerHTML='<p style="color:var(--danger)">'+e.message+'</p>'; return; }
+  var serie=d.serie||[];
+  var totalEntCat=(d.por_categoria_entrada||[]).reduce(function(a,b){return a+(+b.total);},0)||1;
+  var totalSaiCat=(d.por_categoria_saida||[]).reduce(function(a,b){return a+(+b.total);},0)||1;
+  var CORES=['#e8711a','#60a5fa','#34d399','#a78bfa','#fbbf24','#f87171','#6ee7b7','#c084fc'];
+
+  function catRows(list, total) {
+    if(!list||list.length===0) return '<span style="color:var(--muted);font-size:12px">Sem dados</span>';
+    return list.map(function(c,i){
+      var pct=Math.round((+c.total/total)*100);
+      var cor=c.cor&&c.cor!=='#7d8590'?c.cor:CORES[i%CORES.length];
+      return '<div class="cat-row"><div class="cat-dot" style="background:'+escHtml(cor)+'"></div><span style="flex:1">'+escHtml(c.categoria)+'</span><div class="cat-bar-wrap"><div class="cat-bar" style="width:'+pct+'%;background:'+escHtml(cor)+'"></div></div><span class="cat-val">'+fmtBRLFin(c.total)+'</span></div>';
+    }).join('');
+  }
+
+  var detalhes = serie.filter(function(s){return s.entradas>0||s.saidas>0;});
+  var detRows = detalhes.length===0
+    ? '<tr><td colspan="4" style="text-align:center;padding:20px;color:var(--muted)">Sem movimentações no período</td></tr>'
+    : detalhes.map(function(s){
+        return '<tr>'
+          +'<td>'+fmtDateBR(s.dia)+'</td>'
+          +'<td style="text-align:right;color:var(--success)">'+(s.entradas>0?fmtBRLFin(s.entradas):'\u2014')+'</td>'
+          +'<td style="text-align:right;color:var(--danger)">'+(s.saidas>0?fmtBRLFin(s.saidas):'\u2014')+'</td>'
+          +'<td style="text-align:right;font-weight:700;color:'+(s.saldo>=0?'var(--success)':'var(--danger)')+'">'+fmtBRLFin(s.saldo)+'</td>'
+          +'</tr>';
+      }).join('');
+
+  var saldoCor=(+d.saldo_periodo)>=0?'green':'red';
+
+  wrap.innerHTML =
+    '<div class="fin-filters">'
+    +'<select onchange="_fin.flu.periodo=this.value;finRenderAba()">'
+    +'<option value="semana" '+(st.periodo==='semana'?'selected':'')+'>Esta semana</option>'
+    +'<option value="mes" '+(st.periodo==='mes'?'selected':'')+'>Este mês</option>'
+    +'<option value="trimestre" '+(st.periodo==='trimestre'?'selected':'')+'>Últimos 3 meses</option>'
+    +'<option value="ano" '+(st.periodo==='ano'?'selected':'')+'>Este ano</option>'
+    +'<option value="custom" '+(st.periodo==='custom'?'selected':'')+'>Personalizado</option>'
+    +'</select>'
+    +(st.periodo==='custom'
+      ?'<input type="date" value="'+st.data_ini+'" onchange="_fin.flu.data_ini=this.value"/>'
+       +'<input type="date" value="'+st.data_fim+'" onchange="_fin.flu.data_fim=this.value"/>'
+       +'<button class="btn btn-ghost btn-sm" onclick="finRenderAba()">Aplicar</button>'
+      :'')
+    +'<span style="font-size:12px;color:var(--muted)">'+fmtDateBR(d.periodo&&d.periodo.inicio)+' \u2192 '+fmtDateBR(d.periodo&&d.periodo.fim)+'</span>'
+    +'</div>'
+    +'<div class="fin-cards">'
+    +'<div class="fin-card"><div class="fc-label">Entradas Realizadas</div><div class="fc-value green">'+fmtBRLFin(d.total_entradas)+'</div></div>'
+    +'<div class="fin-card"><div class="fc-label">Saídas Realizadas</div><div class="fc-value red">'+fmtBRLFin(d.total_saidas)+'</div></div>'
+    +'<div class="fin-card"><div class="fc-label">Saldo do Período</div><div class="fc-value '+saldoCor+'">'+fmtBRLFin(d.saldo_periodo)+'</div></div>'
+    +'<div class="fin-card"><div class="fc-label">A Receber (previsto)</div><div class="fc-value blue">'+fmtBRLFin(d.previsto_entradas)+'</div></div>'
+    +'<div class="fin-card"><div class="fc-label">A Pagar (previsto)</div><div class="fc-value warn">'+fmtBRLFin(d.previsto_saidas)+'</div></div>'
+    +'</div>'
+    +'<div class="fluxo-chart-wrap"><div class="fluxo-chart-title">Entradas × Saídas por dia</div>'+finGeraGrafico(serie)+'</div>'
+    +'<div class="fluxo-pie-row">'
+    +'<div class="fluxo-pie-box"><div class="fluxo-pie-title">Entradas por Categoria</div><div class="cat-list">'+catRows(d.por_categoria_entrada,totalEntCat)+'</div></div>'
+    +'<div class="fluxo-pie-box"><div class="fluxo-pie-title">Saídas por Categoria</div><div class="cat-list">'+catRows(d.por_categoria_saida,totalSaiCat)+'</div></div>'
+    +'</div>'
+    +'<div class="fluxo-chart-wrap" style="max-height:300px;overflow-y:auto">'
+    +'<div class="fluxo-chart-title">Detalhamento Diário</div>'
+    +'<table class="fin-table" style="font-size:12px"><thead><tr>'
+    +'<th>Data</th><th style="text-align:right">Entradas</th><th style="text-align:right">Saídas</th><th style="text-align:right">Saldo Acumulado</th>'
+    +'</tr></thead><tbody>'+detRows+'</tbody></table>'
+    +'</div>';
+}
+
+function finGeraGrafico(serie) {
+  var W=900,H=200,pl=60,pr=20,pt=16,pb=30,cw=W-pl-pr,ch=H-pt-pb,n=serie.length||1;
+  var maxVal=Math.max.apply(null,[1].concat(serie.map(function(s){return Math.max(+s.entradas,+s.saidas);})));
+  var ey=ch/maxVal, barE='',barS='',lbl='',grid='';
+  for(var gi=0;gi<=4;gi++){
+    var gy=pt+ch-(ch/4)*gi, gv=(maxVal/4)*gi;
+    grid+='<line x1="'+pl+'" y1="'+gy+'" x2="'+(pl+cw)+'" y2="'+gy+'" stroke="var(--border)" stroke-width="1"/>'
+         +'<text x="'+(pl-6)+'" y="'+(gy+4)+'" text-anchor="end" font-size="9" fill="var(--muted)">'+(gv>=1000?Math.round(gv/1000)+'k':Math.round(gv))+'</text>';
+  }
+  serie.forEach(function(s,i){
+    var x=pl+(i/n)*cw, slot=cw/n, bw=Math.min(slot*0.38,18);
+    if(+s.entradas>0) barE+='<rect x="'+(x+slot*0.05)+'" y="'+(pt+ch-(+s.entradas)*ey)+'" width="'+bw+'" height="'+((+s.entradas)*ey)+'" fill="var(--success)" opacity=".8" rx="2"><title>'+fmtDateBR(s.dia)+': '+fmtBRLFin(s.entradas)+'</title></rect>';
+    if(+s.saidas>0) barS+='<rect x="'+(x+slot*0.05+bw+1)+'" y="'+(pt+ch-(+s.saidas)*ey)+'" width="'+bw+'" height="'+((+s.saidas)*ey)+'" fill="var(--danger)" opacity=".8" rx="2"><title>'+fmtDateBR(s.dia)+': '+fmtBRLFin(s.saidas)+'</title></rect>';
+    if(n<=31){var dd=new Date(s.dia+'T00:00:00');if(n<=10||dd.getDay()===1||i===0||i===n-1)lbl+='<text x="'+(x+slot/2)+'" y="'+(H-4)+'" text-anchor="middle" font-size="9" fill="var(--muted)">'+dd.getDate()+'/'+(dd.getMonth()+1)+'</text>';}
+  });
+  return '<svg viewBox="0 0 '+W+' '+H+'" class="fluxo-chart-svg" style="max-height:200px">'+grid+barE+barS+lbl+'<line x1="'+pl+'" y1="'+pt+'" x2="'+pl+'" y2="'+(pt+ch)+'" stroke="var(--border)" stroke-width="1"/><text x="'+(pl+40)+'" y="12" font-size="9" fill="var(--success)">&#9632; Entradas</text><text x="'+(pl+120)+'" y="12" font-size="9" fill="var(--danger)">&#9632; Saídas</text></svg>';
+}
+
+function _finOptsCategoria(tipo,selId){
+  selId=selId||'';
+  var opts=_fin.categorias.filter(function(c){return c.tipo===tipo||c.tipo==='ambos';});
+  return '<option value="">Sem categoria</option>'+opts.map(function(c){return '<option value="'+c.id+'" '+(+selId===+c.id?'selected':'')+'>'+escHtml(c.nome)+'</option>';}).join('');
+}
+function _finOptsCB(selId){
+  selId=selId||'';
+  return '<option value="">Nenhuma conta</option>'+_fin.contas_bancarias.map(function(c){return '<option value="'+c.id+'" '+(+selId===+c.id?'selected':'')+'>'+escHtml(c.nome)+'</option>';}).join('');
+}
+
+function finModalLancamento(tipo){
+  var hoje=new Date().toISOString().substring(0,10);
+  var venc=new Date(Date.now()+30*864e5).toISOString().substring(0,10);
+  var isRec=tipo==='receber';
+  var entidade=isRec
+    ?'<div><label class="form-label">Cliente</label><input id="fn-ent-nome" class="form-input" placeholder="Digite para buscar..." oninput="finBuscarEntidade(this.value,\'cliente\')" autocomplete="off"/><div id="fn-ent-list" style="position:relative"></div><input type="hidden" id="fn-ent-id"/></div>'
+    :'<div><label class="form-label">Fornecedor</label><input id="fn-ent-nome" class="form-input" placeholder="Digite para buscar..." oninput="finBuscarEntidade(this.value,\'fornecedor\')" autocomplete="off"/><div id="fn-ent-list" style="position:relative"></div><input type="hidden" id="fn-ent-id"/></div>';
+  openModal(isRec?'Nova Conta a Receber':'Nova Conta a Pagar',
+    '<div style="display:grid;gap:12px;padding:4px 0">'
+    +'<div><label class="form-label">Descrição *</label><input id="fn-desc" class="form-input" placeholder="Ex: Aluguel, Mensalidade..."/></div>'
+    +'<div style="display:grid;grid-template-columns:1fr 1fr;gap:10px">'
+    +'<div><label class="form-label">Valor (R$) *</label><input id="fn-val" class="form-input" type="number" step="0.01" min="0.01" placeholder="0,00"/></div>'
+    +'<div><label class="form-label">Vencimento</label><input id="fn-venc" class="form-input" type="date" value="'+venc+'"/></div>'
+    +'</div>'
+    +'<div style="display:grid;grid-template-columns:1fr 1fr;gap:10px">'
+    +'<div><label class="form-label">Data Emissão</label><input id="fn-emis" class="form-input" type="date" value="'+hoje+'"/></div>'
+    +'<div><label class="form-label">Documento Ref.</label><input id="fn-doc" class="form-input" placeholder="NF, contrato..."/></div>'
+    +'</div>'
+    +'<div><label class="form-label">Categoria</label><select id="fn-cat" class="form-input">'+_finOptsCategoria(isRec?'receber':'pagar')+'</select></div>'
+    +'<div><label class="form-label">Conta Bancária</label><select id="fn-cb" class="form-input">'+_finOptsCB()+'</select></div>'
+    +entidade
+    +'<div><label class="form-label">Observações</label><textarea id="fn-obs" class="form-input" rows="2" style="resize:vertical"></textarea></div>'
+    +'</div>',
+    '<button class="btn btn-ghost" onclick="closeModal()">Cancelar</button>'
+    +'<button class="btn btn-primary" onclick="finSalvarLancamento(\''+tipo+'\')">Salvar</button>'
+  );
+  window._finLancTipo = tipo;
+}
+
+async function finBuscarEntidade(q, tipo) {
+  var listEl = document.getElementById('fn-ent-list');
+  if(!q||q.length<2||!listEl){if(listEl)listEl.innerHTML='';return;}
+  try {
+    var lista;
+    if(tipo==='cliente'){var res=await api('clientes','','GET',null,{q:q,limit:8});lista=(res.data||[]).map(function(c){return{id:c.id,nome:c.nome};});}
+    else{var res2=await api('fornecedores','','GET',null,{q:q,limit:8});lista=(res2||[]).map(function(f){return{id:f.id,nome:f.razao_social};});}
+    listEl.innerHTML='<div style="position:absolute;z-index:999;background:var(--surface);border:1px solid var(--border);border-radius:var(--radius);width:100%;max-height:200px;overflow-y:auto;box-shadow:var(--shadow)">'
+      +lista.map(function(item){return '<div style="padding:8px 12px;cursor:pointer;font-size:13px" onmousedown="document.getElementById(\'fn-ent-nome\').value=\''+escHtml(item.nome).replace(/'/g,"\\'")+'\';document.getElementById(\'fn-ent-id\').value=\''+item.id+'\';document.getElementById(\'fn-ent-list\').innerHTML=\'\'">'+escHtml(item.nome)+'</div>';}).join('')
+      +(lista.length===0?'<div style="padding:8px 12px;color:var(--muted);font-size:13px">Nenhum encontrado</div>':'')
+      +'</div>';
+  }catch(e){}
+}
+
+async function finSalvarLancamento(tipo){
+  var desc=document.getElementById('fn-desc')&&document.getElementById('fn-desc').value.trim();
+  var val=parseFloat((document.getElementById('fn-val')&&document.getElementById('fn-val').value)||'0');
+  if(!desc) return toast('Descrição obrigatória','error');
+  if(!val||val<=0) return toast('Informe um valor maior que zero','error');
+  var body={
+    origem:'manual',descricao:desc,valor:val,
+    data_emissao:(document.getElementById('fn-emis')&&document.getElementById('fn-emis').value)||'',
+    data_vencimento:(document.getElementById('fn-venc')&&document.getElementById('fn-venc').value)||'',
+    documento_ref:(document.getElementById('fn-doc')&&document.getElementById('fn-doc').value)||'',
+    categoria_id:(document.getElementById('fn-cat')&&document.getElementById('fn-cat').value)||null,
+    conta_bancaria_id:(document.getElementById('fn-cb')&&document.getElementById('fn-cb').value)||null,
+    observacoes:(document.getElementById('fn-obs')&&document.getElementById('fn-obs').value)||''
+  };
+  var entId=(document.getElementById('fn-ent-id')&&document.getElementById('fn-ent-id').value)||null;
+  if(tipo==='receber') body.cliente_id=entId;
+  else body.fornecedor_id=entId;
+  try{await api(tipo==='receber'?'contas_receber':'contas_pagar','','POST',body);toast('Lançamento salvo');closeModal();finRenderAba();}
+  catch(e){toast(e.message,'error');}
+}
+
+function finModalReceber(id,valor,rec){
+  var rest=Math.max(0,(+valor)-(+rec));var hoje=new Date().toISOString().substring(0,10);
+  openModal('Registrar Recebimento',
+    '<div style="display:grid;gap:12px;padding:4px 0">'
+    +'<div style="background:var(--surface2);border-radius:var(--radius);padding:12px;font-size:13px">'
+    +'<div>Total: <strong>'+fmtBRLFin(valor)+'</strong></div>'
+    +(rec>0?'<div style="color:var(--warn)">Já recebido: '+fmtBRLFin(rec)+'</div>':'')
+    +'<div>Restante: <strong style="color:var(--accent)">'+fmtBRLFin(rest)+'</strong></div>'
+    +'</div>'
+    +'<div><label class="form-label">Valor Recebido (R$) *</label><input id="fr-val" class="form-input" type="number" step="0.01" value="'+rest.toFixed(2)+'"/></div>'
+    +'<div><label class="form-label">Data do Recebimento *</label><input id="fr-dt" class="form-input" type="date" value="'+hoje+'"/></div>'
+    +'<div><label class="form-label">Conta Bancária</label><select id="fr-cb" class="form-input">'+_finOptsCB()+'</select></div>'
+    +'</div>',
+    '<button class="btn btn-ghost" onclick="closeModal()">Cancelar</button>'
+    +'<button class="btn btn-primary" onclick="finConfirmarReceber('+id+')">✅ Confirmar Recebimento</button>'
+  );
+}
+async function finConfirmarReceber(id){
+  var val=parseFloat((document.getElementById('fr-val')&&document.getElementById('fr-val').value)||'0');
+  var dt=document.getElementById('fr-dt')&&document.getElementById('fr-dt').value;
+  var cb=(document.getElementById('fr-cb')&&document.getElementById('fr-cb').value)||null;
+  if(!val||val<=0) return toast('Informe o valor','error');
+  if(!dt) return toast('Informe a data','error');
+  try{await api('contas_receber','receber','POST',{valor_recebido:val,data_recebimento:dt,conta_bancaria_id:cb},{id:id});toast('Recebimento registrado');closeModal();finRenderAba();}
+  catch(e){toast(e.message,'error');}
+}
+
+function finModalPagar(id,valor,pago){
+  var rest=Math.max(0,(+valor)-(+pago));var hoje=new Date().toISOString().substring(0,10);
+  openModal('Registrar Pagamento',
+    '<div style="display:grid;gap:12px;padding:4px 0">'
+    +'<div style="background:var(--surface2);border-radius:var(--radius);padding:12px;font-size:13px">'
+    +'<div>Total: <strong>'+fmtBRLFin(valor)+'</strong></div>'
+    +(pago>0?'<div style="color:var(--warn)">Já pago: '+fmtBRLFin(pago)+'</div>':'')
+    +'<div>Restante: <strong style="color:var(--accent)">'+fmtBRLFin(rest)+'</strong></div>'
+    +'</div>'
+    +'<div><label class="form-label">Valor Pago (R$) *</label><input id="fp-val" class="form-input" type="number" step="0.01" value="'+rest.toFixed(2)+'"/></div>'
+    +'<div><label class="form-label">Data do Pagamento *</label><input id="fp-dt" class="form-input" type="date" value="'+hoje+'"/></div>'
+    +'<div><label class="form-label">Conta Bancária</label><select id="fp-cb" class="form-input">'+_finOptsCB()+'</select></div>'
+    +'</div>',
+    '<button class="btn btn-ghost" onclick="closeModal()">Cancelar</button>'
+    +'<button class="btn btn-primary" onclick="finConfirmarPagamento('+id+')">✅ Confirmar Pagamento</button>'
+  );
+}
+async function finConfirmarPagamento(id){
+  var val=parseFloat((document.getElementById('fp-val')&&document.getElementById('fp-val').value)||'0');
+  var dt=document.getElementById('fp-dt')&&document.getElementById('fp-dt').value;
+  var cb=(document.getElementById('fp-cb')&&document.getElementById('fp-cb').value)||null;
+  if(!val||val<=0) return toast('Informe o valor','error');
+  if(!dt) return toast('Informe a data','error');
+  try{await api('contas_pagar','pagar','POST',{valor_pago:val,data_pagamento:dt,conta_bancaria_id:cb},{id:id});toast('Pagamento registrado');closeModal();finRenderAba();}
+  catch(e){toast(e.message,'error');}
+}
+
+async function finModalEditarCR(id){
+  var r; try{r=await api('contas_receber','','GET',null,{id:id});}catch(e){toast(e.message,'error');return;}
+  openModal('Editar Conta a Receber',
+    '<div style="display:grid;gap:12px;padding:4px 0">'
+    +'<div><label class="form-label">Descrição *</label><input id="fe-desc" class="form-input" value="'+escHtml(r.descricao)+'"/></div>'
+    +'<div style="display:grid;grid-template-columns:1fr 1fr;gap:10px">'
+    +'<div><label class="form-label">Valor</label><input id="fe-val" class="form-input" type="number" step="0.01" value="'+r.valor+'"/></div>'
+    +'<div><label class="form-label">Vencimento</label><input id="fe-venc" class="form-input" type="date" value="'+(r.data_vencimento||'')+'"/></div>'
+    +'</div>'
+    +'<div><label class="form-label">Data Emissão</label><input id="fe-emis" class="form-input" type="date" value="'+(r.data_emissao||'')+'"/></div>'
+    +'<div><label class="form-label">Documento Ref.</label><input id="fe-doc" class="form-input" value="'+escHtml(r.documento_ref||'')+'"/></div>'
+    +'<div><label class="form-label">Categoria</label><select id="fe-cat" class="form-input">'+_finOptsCategoria('receber',r.categoria_id)+'</select></div>'
+    +'<div><label class="form-label">Conta Bancária</label><select id="fe-cb" class="form-input">'+_finOptsCB(r.conta_bancaria_id)+'</select></div>'
+    +'<div><label class="form-label">Observações</label><textarea id="fe-obs" class="form-input" rows="2">'+escHtml(r.observacoes||'')+'</textarea></div>'
+    +'</div>',
+    '<button class="btn btn-ghost" onclick="closeModal()">Cancelar</button>'
+    +'<button class="btn btn-primary" onclick="finSalvarEditarCR('+id+')">Salvar</button>'
+  );
+}
+async function finSalvarEditarCR(id){
+  var body={
+    descricao:(document.getElementById('fe-desc')&&document.getElementById('fe-desc').value.trim()),
+    valor:parseFloat((document.getElementById('fe-val')&&document.getElementById('fe-val').value)||'0'),
+    data_emissao:(document.getElementById('fe-emis')&&document.getElementById('fe-emis').value)||null,
+    data_vencimento:(document.getElementById('fe-venc')&&document.getElementById('fe-venc').value)||null,
+    documento_ref:(document.getElementById('fe-doc')&&document.getElementById('fe-doc').value)||'',
+    categoria_id:(document.getElementById('fe-cat')&&document.getElementById('fe-cat').value)||null,
+    conta_bancaria_id:(document.getElementById('fe-cb')&&document.getElementById('fe-cb').value)||null,
+    observacoes:(document.getElementById('fe-obs')&&document.getElementById('fe-obs').value)||''
+  };
+  if(!body.descricao) return toast('Descrição obrigatória','error');
+  try{await api('contas_receber','','PUT',body,{id:id});toast('Salvo');closeModal();finRenderAba();}catch(e){toast(e.message,'error');}
+}
+
+async function finModalEditarCP(id){
+  var r; try{r=await api('contas_pagar','','GET',null,{id:id});}catch(e){toast(e.message,'error');return;}
+  openModal('Editar Conta a Pagar',
+    '<div style="display:grid;gap:12px;padding:4px 0">'
+    +'<div><label class="form-label">Descrição *</label><input id="fep-desc" class="form-input" value="'+escHtml(r.descricao)+'"/></div>'
+    +'<div style="display:grid;grid-template-columns:1fr 1fr;gap:10px">'
+    +'<div><label class="form-label">Valor</label><input id="fep-val" class="form-input" type="number" step="0.01" value="'+r.valor+'"/></div>'
+    +'<div><label class="form-label">Vencimento</label><input id="fep-venc" class="form-input" type="date" value="'+(r.data_vencimento||'')+'"/></div>'
+    +'</div>'
+    +'<div><label class="form-label">Data Emissão</label><input id="fep-emis" class="form-input" type="date" value="'+(r.data_emissao||'')+'"/></div>'
+    +'<div><label class="form-label">Documento Ref.</label><input id="fep-doc" class="form-input" value="'+escHtml(r.documento_ref||'')+'"/></div>'
+    +'<div><label class="form-label">Categoria</label><select id="fep-cat" class="form-input">'+_finOptsCategoria('pagar',r.categoria_id)+'</select></div>'
+    +'<div><label class="form-label">Conta Bancária</label><select id="fep-cb" class="form-input">'+_finOptsCB(r.conta_bancaria_id)+'</select></div>'
+    +'<div><label class="form-label">Observações</label><textarea id="fep-obs" class="form-input" rows="2">'+escHtml(r.observacoes||'')+'</textarea></div>'
+    +'</div>',
+    '<button class="btn btn-ghost" onclick="closeModal()">Cancelar</button>'
+    +'<button class="btn btn-primary" onclick="finSalvarEditarCP('+id+')">Salvar</button>'
+  );
+}
+async function finSalvarEditarCP(id){
+  var body={
+    descricao:(document.getElementById('fep-desc')&&document.getElementById('fep-desc').value.trim()),
+    valor:parseFloat((document.getElementById('fep-val')&&document.getElementById('fep-val').value)||'0'),
+    data_emissao:(document.getElementById('fep-emis')&&document.getElementById('fep-emis').value)||null,
+    data_vencimento:(document.getElementById('fep-venc')&&document.getElementById('fep-venc').value)||null,
+    documento_ref:(document.getElementById('fep-doc')&&document.getElementById('fep-doc').value)||'',
+    categoria_id:(document.getElementById('fep-cat')&&document.getElementById('fep-cat').value)||null,
+    conta_bancaria_id:(document.getElementById('fep-cb')&&document.getElementById('fep-cb').value)||null,
+    observacoes:(document.getElementById('fep-obs')&&document.getElementById('fep-obs').value)||''
+  };
+  if(!body.descricao) return toast('Descrição obrigatória','error');
+  try{await api('contas_pagar','','PUT',body,{id:id});toast('Salvo');closeModal();finRenderAba();}catch(e){toast(e.message,'error');}
+}
+
+async function finCancelarCR(id){if(!confirm('Cancelar esta conta a receber?'))return;try{await api('contas_receber','cancelar','POST',{},{id:id});toast('Cancelada');finRenderAba();}catch(e){toast(e.message,'error');}}
+async function finCancelarCP(id){if(!confirm('Cancelar esta conta a pagar?'))return;try{await api('contas_pagar','cancelar','POST',{},{id:id});toast('Cancelada');finRenderAba();}catch(e){toast(e.message,'error');}}
+
+// ── Categorias Financeiras (CRUD) ────────────────────────────
+async function renderCategoriasFinanceiras(){
+  document.querySelector('.page-title').textContent='Categorias Financeiras';
+  var cats=await api('categorias_financeiras').catch(function(){return[];});
+  var tl={ambos:'Ambos',receber:'A Receber',pagar:'A Pagar'};
+  var el=document.getElementById('content');
+  var cards=cats.map(function(c){
+    return '<div style="background:var(--surface);border:1px solid var(--border);border-radius:var(--radius);padding:14px 16px;display:flex;align-items:center;gap:12px">'
+      +'<div style="width:18px;height:18px;border-radius:50%;background:'+escHtml(c.cor)+';flex-shrink:0"></div>'
+      +'<div style="flex:1"><div style="font-weight:600">'+escHtml(c.nome)+'</div><div style="font-size:11px;color:var(--muted)">'+(tl[c.tipo]||c.tipo)+'</div></div>'
+      +'<button class="btn btn-ghost btn-icon btn-sm" onclick="catFinModalEditar('+c.id+',\''+escHtml(c.nome).replace(/'/g,"\\'")+'\',\''+c.tipo+'\',\''+escHtml(c.cor)+'\')">✏️</button>'
+      +'<button class="btn btn-ghost btn-icon btn-sm" style="color:var(--danger)" onclick="catFinExcluir('+c.id+')">✕</button>'
+      +'</div>';
+  }).join('');
+  el.innerHTML='<div style="padding:20px">'
+    +'<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:18px">'
+    +'<h2 style="font-family:var(--font-head);font-weight:800;font-size:20px">Categorias Financeiras</h2>'
+    +'<button class="btn btn-primary btn-sm" onclick="catFinModalNova()">+ Nova Categoria</button>'
+    +'</div>'
+    +'<div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(260px,1fr));gap:12px">'
+    +cards
+    +(cats.length===0?'<p style="color:var(--muted)">Nenhuma categoria cadastrada ainda.</p>':'')
+    +'</div></div>';
+}
+
+function catFinModalNova(){
+  openModal('Nova Categoria Financeira',
+    '<div style="display:grid;gap:12px;padding:4px 0">'
+    +'<div><label class="form-label">Nome *</label><input id="cf-nome" class="form-input" placeholder="Ex: Aluguel, Salário..."/></div>'
+    +'<div><label class="form-label">Tipo</label><select id="cf-tipo" class="form-input"><option value="ambos">Ambos (Pagar e Receber)</option><option value="receber">Apenas A Receber</option><option value="pagar">Apenas A Pagar</option></select></div>'
+    +'<div><label class="form-label">Cor</label><input id="cf-cor" class="form-input" type="color" value="#e8711a" style="height:38px;padding:2px 6px;cursor:pointer"/></div>'
+    +'</div>',
+    '<button class="btn btn-ghost" onclick="closeModal()">Cancelar</button><button class="btn btn-primary" onclick="catFinSalvar(null)">Salvar</button>'
+  );
+}
+function catFinModalEditar(id,nome,tipo,cor){
+  openModal('Editar Categoria',
+    '<div style="display:grid;gap:12px;padding:4px 0">'
+    +'<div><label class="form-label">Nome *</label><input id="cf-nome" class="form-input" value="'+escHtml(nome)+'"/></div>'
+    +'<div><label class="form-label">Tipo</label><select id="cf-tipo" class="form-input">'
+    +'<option value="ambos" '+(tipo==='ambos'?'selected':'')+'>Ambos</option>'
+    +'<option value="receber" '+(tipo==='receber'?'selected':'')+'>Apenas A Receber</option>'
+    +'<option value="pagar" '+(tipo==='pagar'?'selected':'')+'>Apenas A Pagar</option>'
+    +'</select></div>'
+    +'<div><label class="form-label">Cor</label><input id="cf-cor" class="form-input" type="color" value="'+cor+'" style="height:38px;padding:2px 6px;cursor:pointer"/></div>'
+    +'</div>',
+    '<button class="btn btn-ghost" onclick="closeModal()">Cancelar</button><button class="btn btn-primary" onclick="catFinSalvar('+id+')">Salvar</button>'
+  );
+}
+async function catFinSalvar(id){
+  var nome=document.getElementById('cf-nome')&&document.getElementById('cf-nome').value.trim();
+  if(!nome) return toast('Nome obrigatório','error');
+  var body={nome:nome,tipo:(document.getElementById('cf-tipo')&&document.getElementById('cf-tipo').value),cor:(document.getElementById('cf-cor')&&document.getElementById('cf-cor').value)};
+  try{
+    if(id) await api('categorias_financeiras','','PUT',body,{id:id});
+    else   await api('categorias_financeiras','','POST',body);
+    toast('Categoria salva');closeModal();renderCategoriasFinanceiras();
+  }catch(e){toast(e.message,'error');}
+}
+async function catFinExcluir(id){
+  if(!confirm('Excluir esta categoria?'))return;
+  try{await api('categorias_financeiras','','DELETE',null,{id:id});toast('Excluída');renderCategoriasFinanceiras();}
+  catch(e){toast(e.message,'error');}
+}
+
+// ── Hook de navegação ─────────────────────────────────────────
+(function(){
+  var _orig=window.nav;
+  window.nav=function(page){
+    if(page==='financeiro'){
+      currentPage='financeiro';
+      document.querySelectorAll('.nav-item').forEach(function(i){i.classList.toggle('active',i.dataset.page==='financeiro');});
+      renderFinanceiro();return;
+    }
+    if(page==='categorias_financeiras'){
+      currentPage='categorias_financeiras';
+      document.querySelectorAll('.nav-item').forEach(function(i){i.classList.toggle('active',i.dataset.page==='categorias_financeiras');});
+      renderCategoriasFinanceiras();return;
+    }
+    _orig(page);
+  };
+})();
+// ════════════════════════════════════════════════════════════════
+// FIM DO MÓDULO FINANCEIRO
+// ════════════════════════════════════════════════════════════════
 </script>
 </body>
 </html>
