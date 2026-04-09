@@ -1,0 +1,22 @@
+{
+    "name": "consertaos/nfce",
+    "description": "ConsertaOS — Integração NFePHP para NFC-e e NFS-e",
+    "type": "project",
+    "require": {
+        "php": ">=8.0",
+        "nfephp-org/sped-nfe": "^5.1",
+        "nfephp-org/sped-da": "^5.1",
+        "nfephp-org/sped-common": "^5.2"
+    },
+    "config": {
+        "optimize-autoloader": true,
+        "sort-packages": true
+    },
+    "autoload": {
+        "psr-4": {
+            "ConsertaOS\\NfcE\\": "src/"
+        }
+    },
+    "minimum-stability": "stable",
+    "prefer-stable": true
+}
