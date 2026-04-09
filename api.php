@@ -77,7 +77,7 @@ $tables = [
 "CREATE TABLE IF NOT EXISTS vendas (id INTEGER PRIMARY KEY AUTOINCREMENT, cliente_id INTEGER, vendedor_id INTEGER, os_id INTEGER, cpf_cnpj TEXT DEFAULT '', data_criacao DATETIME DEFAULT CURRENT_TIMESTAMP, data_confirmacao DATETIME, status TEXT DEFAULT 'Paga', total REAL DEFAULT 0, desconto_valor REAL DEFAULT 0, desconto_percentual REAL DEFAULT 0, desconto_tipo TEXT DEFAULT 'valor', acrescimo_valor REAL DEFAULT 0, acrescimo_percentual REAL DEFAULT 0, acrescimo_tipo TEXT DEFAULT 'valor', valor_frete REAL DEFAULT 0, observacoes TEXT DEFAULT '')",
 "CREATE TABLE IF NOT EXISTS venda_faturamentos (id INTEGER PRIMARY KEY AUTOINCREMENT, venda_id INTEGER NOT NULL, forma_pagamento_id INTEGER, forma_pagamento_nome TEXT DEFAULT '', valor_total REAL DEFAULT 0, valor_pago REAL DEFAULT 0, num_parcelas INTEGER DEFAULT 1, data_primeira_parcela DATE, intervalo_dias INTEGER DEFAULT 30, juros_am REAL DEFAULT 0, taxa_fixa REAL DEFAULT 0, tipo_repeticao TEXT DEFAULT 'mensal', observacoes TEXT DEFAULT '')",
 "CREATE TABLE IF NOT EXISTS venda_parcelas (id INTEGER PRIMARY KEY AUTOINCREMENT, faturamento_id INTEGER NOT NULL, venda_id INTEGER, numero INTEGER DEFAULT 1, valor REAL DEFAULT 0, valor_juros REAL DEFAULT 0, valor_taxa REAL DEFAULT 0, data_vencimento DATE, data_pagamento DATE, status TEXT DEFAULT 'Aberta')",
-"CREATE TABLE IF NOT EXISTS venda_items (id INTEGER PRIMARY KEY AUTOINCREMENT, venda_id INTEGER, produto_id INTEGER, quantidade REAL DEFAULT 1, valor_unitario REAL DEFAULT 0, desconto_valor REAL DEFAULT 0, desconto_percentual REAL DEFAULT 0, acrescimo_valor REAL DEFAULT 0, subtotal REAL DEFAULT 0)",
+"CREATE TABLE IF NOT EXISTS venda_items (id INTEGER PRIMARY KEY AUTOINCREMENT, venda_id INTEGER, produto_id INTEGER, descricao TEXT DEFAULT '', quantidade REAL DEFAULT 1, valor_unitario REAL DEFAULT 0, desconto_valor REAL DEFAULT 0, desconto_percentual REAL DEFAULT 0, acrescimo_valor REAL DEFAULT 0, subtotal REAL DEFAULT 0)",
 "CREATE TABLE IF NOT EXISTS fornecedores (id INTEGER PRIMARY KEY AUTOINCREMENT, razao_social TEXT NOT NULL, nome_fantasia TEXT DEFAULT '', cpf_cnpj TEXT DEFAULT '', telefone TEXT DEFAULT '', email TEXT DEFAULT '', endereco TEXT DEFAULT '', ativo INTEGER DEFAULT 1, data_criacao DATETIME DEFAULT CURRENT_TIMESTAMP)",
 "CREATE TABLE IF NOT EXISTS tabelas_preco (id INTEGER PRIMARY KEY AUTOINCREMENT, produto_id INTEGER NOT NULL, nome TEXT NOT NULL, margem_lucro REAL DEFAULT 0, preco_venda REAL DEFAULT 0)",
 "CREATE TABLE IF NOT EXISTS ncm_tabela (id INTEGER PRIMARY KEY AUTOINCREMENT, codigo TEXT NOT NULL UNIQUE, descricao TEXT NOT NULL, aliq_ii REAL DEFAULT 0, aliq_ipi REAL DEFAULT 0, aliq_pis REAL DEFAULT 0, aliq_cofins REAL DEFAULT 0)",
@@ -159,6 +159,7 @@ $migrations = [
     ['contas_pagar',    'conta_bancaria_id','INTEGER'],
     ['contas_pagar',    'documento_ref',    "TEXT DEFAULT ''"],
     ['contas_pagar',    'cliente_id',       'INTEGER'],
+    ['venda_items',     'descricao',        "TEXT DEFAULT ''"],
     ['ordens_servico',  'informacoes_adicionais', "TEXT DEFAULT ''"],
     ['ordens_servico',  'senha_aparelho',   "TEXT DEFAULT ''"],
     ['ordens_servico',  'previsao_conclusao', 'DATE'],
@@ -1097,8 +1098,9 @@ if ($resource === 'vendas') {
             foreach ($items as $item) {
                 $qty = (float)($item['quantidade']??1);
                 $vu  = (float)($item['valor_unitario']??0);
-                $db->prepare("INSERT INTO venda_items (venda_id,produto_id,quantidade,valor_unitario,subtotal) VALUES (?,?,?,?,?)")
-                   ->execute([$vid,$item['produto_id']??null,$qty,$vu,round($qty*$vu,2)]);
+                $desc_item = trim($item['descricao_manual'] ?? $item['descricao'] ?? '');
+                $db->prepare("INSERT INTO venda_items (venda_id,produto_id,descricao,quantidade,valor_unitario,subtotal) VALUES (?,?,?,?,?,?)")
+                   ->execute([$vid,$item['produto_id']??null,$desc_item,$qty,$vu,round($qty*$vu,2)]);
             }
             // Faturamentos e parcelas
             foreach (($data['faturamentos']??[]) as $fat) {

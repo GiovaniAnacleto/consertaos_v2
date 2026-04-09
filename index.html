@@ -744,7 +744,7 @@ select option{background:var(--surface2)}
 .fin-card .fc-value.blue{color:var(--info);}
 .fin-card .fc-sub{font-size:11px;color:var(--muted);margin-top:3px;}
 
-.fin-filters{display:flex;gap:8px;flex-wrap:wrap;margin-bottom:16px;align-items:center;}
+.fin-filters{display:flex;gap:8px;flex-wrap:wrap;margin-bottom:16px;align-items:center;row-gap:8px;}
 .fin-filters input,.fin-filters select{padding:7px 10px;background:var(--surface);border:1px solid var(--border);border-radius:var(--radius);color:var(--text);font-size:13px;}
 .fin-filters input:focus,.fin-filters select:focus{outline:none;border-color:var(--accent);}
 
@@ -908,7 +908,9 @@ function nav(page) {
   document.getElementById('topbar-title').textContent = pageTitles[page]||page;
   document.getElementById('topbar-actions').innerHTML = '';
   document.getElementById('content').innerHTML = '<div style="padding:40px;text-align:center;color:var(--muted)">Carregando...</div>';
-  pages[page]?.();
+  const _cb = window._navAfterLoad;
+  window._navAfterLoad = null;
+  Promise.resolve(pages[page]?.()).then(() => { if (_cb) _cb(); });
 }
 
 // ════════════════════════════════════
@@ -1465,6 +1467,18 @@ pages.dashboard=async()=>{
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" style="width:28px;height:28px"><path d="M17 21v-2a4 4 0 00-4-4H5a4 4 0 00-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M23 21v-2a4 4 0 00-3-3.87"/><path d="M16 3.13a4 4 0 010 7.75"/></svg>
         </div>
         <span class="dash-shortcut-label">Clientes</span>
+      </div>
+      <div class="dash-shortcut" style="background:linear-gradient(135deg,#f59e0b,#d97706)" onclick="nav('produtos')">
+        <div class="dash-shortcut-icon">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" style="width:28px;height:28px"><path d="M21 16V8a2 2 0 00-1-1.73l-7-4a2 2 0 00-2 0l-7 4A2 2 0 003 8v8a2 2 0 001 1.73l7 4a2 2 0 002 0l7-4A2 2 0 0021 16z"/><polyline points="3.27 6.96 12 12.01 20.73 6.96"/><line x1="12" y1="22.08" x2="12" y2="12"/></svg>
+        </div>
+        <span class="dash-shortcut-label">Produtos</span>
+      </div>
+      <div class="dash-shortcut" style="background:linear-gradient(135deg,#ec4899,#db2777)" onclick="nav('servicos')">
+        <div class="dash-shortcut-icon">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" style="width:28px;height:28px"><path d="M14.7 6.3a1 1 0 000 1.4l1.6 1.6a1 1 0 001.4 0l3.77-3.77a6 6 0 01-7.94 7.94l-6.91 6.91a2.12 2.12 0 01-3-3l6.91-6.91a6 6 0 017.94-7.94l-3.76 3.76z"/></svg>
+        </div>
+        <span class="dash-shortcut-label">Serviços</span>
       </div>
     </div>
     <!-- Stats -->
@@ -2505,9 +2519,14 @@ async function openNovaVenda(osId=null, clienteIdPresel=null){
   function renderItems(){
     return items.map((it,i)=>`
       <tr id="vitem-${i}">
-        <td>
-          <select onchange="vdItemProd(${i},this.value)" style="width:100%">
-            <option value="">— Produto / Serviço —</option>
+        <td style="min-width:220px">
+          <input type="text" placeholder="Descrição do serviço / produto..."
+            value="${escHtml(it.descricao_manual||'')}"
+            style="width:100%;margin-bottom:4px;padding:5px 8px;border:1px solid var(--border);border-radius:4px;background:var(--surface);color:var(--text);font-size:12px"
+            oninput="items[${i}].descricao_manual=this.value"
+            title="Descrição livre — usado quando nenhum produto for selecionado abaixo"/>
+          <select onchange="vdItemProd(${i},this.value)" style="width:100%;font-size:12px">
+            <option value="">— Vincular produto/serviço (opcional) —</option>
             ${produtos.map(p=>`<option value="${p.id}" data-preco="${p.preco_venda||0}" ${String(p.id)===String(it.produto_id)?'selected':''}>${escHtml(p.descricao)}</option>`).join('')}
           </select>
         </td>
@@ -2662,12 +2681,20 @@ async function openNovaVenda(osId=null, clienteIdPresel=null){
     items[i].valor_unitario=preco;
     document.getElementById(`vd-vu-${i}`).value=preco;
     document.getElementById(`vd-sub-${i}`).textContent='R$ '+(items[i].quantidade*preco).toFixed(2);
+    // Se o produto foi selecionado e a descrição estava vazia, preencher com o nome do produto
+    if(pid && opt){
+      const descEl=document.querySelector(`#vitem-${i} input[type="text"]`);
+      if(descEl && !descEl.value.trim()){
+        descEl.value=opt.textContent.trim();
+        items[i].descricao_manual=opt.textContent.trim();
+      }
+    }
     refreshTotal();
   };
   window.vdItemQtd=(i,v)=>{items[i].quantidade=+v;document.getElementById(`vd-sub-${i}`).textContent='R$ '+(+v*(+items[i].valor_unitario)).toFixed(2);refreshTotal();};
   window.vdItemVU=(i,v)=>{items[i].valor_unitario=+v;document.getElementById(`vd-sub-${i}`).textContent='R$ '+(items[i].quantidade*(+v)).toFixed(2);refreshTotal();};
   window.vdItemRem=(i)=>{items.splice(i,1);refreshItems();};
-  window.vendaAddItem=()=>{items.push({produto_id:'',quantidade:1,valor_unitario:0});refreshItems();};
+  window.vendaAddItem=()=>{items.push({produto_id:'',quantidade:1,valor_unitario:0,descricao_manual:''});refreshItems();};
   window.vdFatRemove=(fi)=>{faturamentos.splice(fi,1);renderFaturamentos();};
   window.vdFatFP=(fi,fpId)=>{
     const opt=document.querySelector(`#fat-fp-${fi} option[value="${fpId}"]`);
@@ -2786,7 +2813,7 @@ async function openNovaVenda(osId=null, clienteIdPresel=null){
     <!-- ABA ITENS -->
     <div id="vd-panel-itens" style="display:none">
       <div class="table-wrap"><table>
-        <thead><tr><th>Produto / Serviço</th><th>Qtd</th><th>Valor Unit. (R$)</th><th>Subtotal</th><th></th></tr></thead>
+        <thead><tr><th>Descrição / Produto</th><th>Qtd</th><th>Valor Unit. (R$)</th><th>Subtotal</th><th></th></tr></thead>
         <tbody id="vd-items-body">${renderItems()}</tbody>
       </table></div>
       <button type="button" class="btn btn-ghost btn-sm" style="margin-top:8px" onclick="vendaAddItem()">+ Adicionar item</button>
@@ -2875,10 +2902,23 @@ async function salvarVenda(){
   const itens=[];
   document.querySelectorAll('#vd-items-body tr').forEach(tr=>{
     const sel=tr.querySelector('select');
+    const descInput=tr.querySelector('input[type="text"]');
     const inps=tr.querySelectorAll('input[type="number"]');
-    if(sel?.value) itens.push({produto_id:+sel.value,quantidade:+(inps[0]?.value||1),valor_unitario:+(inps[1]?.value||0)});
+    const pid=sel?.value||'';
+    const desc=descInput?.value?.trim()||'';
+    const qtd=+(inps[0]?.value||1);
+    const vu=+(inps[1]?.value||0);
+    // Incluir item se tiver produto OU descrição preenchida, com valor > 0
+    if(pid||desc){
+      itens.push({
+        produto_id: pid?+pid:null,
+        quantidade: qtd,
+        valor_unitario: vu,
+        descricao_manual: desc,
+      });
+    }
   });
-  if(!itens.length) return toast('Adicione pelo menos um item na aba Itens','error');
+  if(!itens.length) return toast('Adicione pelo menos um item com produto ou descrição na aba Itens','error');
 
   // Faturamentos: sincroniza parcelas calculadas
   // (já armazenadas no array faturamentos pelo calcParcelas)
@@ -5495,11 +5535,11 @@ function abrirSelecaoVenda(){
   openModal('sm','Realizar Venda',`
     <p style="font-size:13px;color:var(--muted);margin-bottom:16px">Escolha o tipo de venda:</p>
     <div style="display:grid;grid-template-columns:1fr 1fr;gap:10px">
-      <button class="btn btn-ghost" style="flex-direction:column;gap:8px;padding:20px 12px;height:auto;border-radius:10px" onclick="closeModal();nav('vendas')">
+      <button class="btn btn-ghost" style="flex-direction:column;gap:8px;padding:20px 12px;height:auto;border-radius:10px" onclick="closeModal();window._navAfterLoad=function(){openNovaVenda();};nav('vendas');">
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="width:28px;height:28px;color:var(--accent)"><rect x="2" y="3" width="20" height="14" rx="2"/><path d="M8 21h8M12 17v4"/></svg>
         <span style="font-size:13px;font-weight:600">Venda Simples<br><span style="font-size:11px;font-weight:400;color:var(--muted)">(PDV)</span></span>
       </button>
-      <button class="btn btn-ghost" style="flex-direction:column;gap:8px;padding:20px 12px;height:auto;border-radius:10px" onclick="closeModal();nav('vendas_nfce')">
+      <button class="btn btn-ghost" style="flex-direction:column;gap:8px;padding:20px 12px;height:auto;border-radius:10px" onclick="closeModal();window._navAfterLoad=function(){abrirNovaNfce();};nav('vendas_nfce');">
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="width:28px;height:28px;color:#6366f1"><path d="M14 2H6a2 2 0 00-2 2v16a2 2 0 002 2h12a2 2 0 002-2V8z"/><polyline points="14 2 14 8 20 8"/><line x1="16" y1="13" x2="8" y2="13"/><line x1="16" y1="17" x2="8" y2="17"/></svg>
         <span style="font-size:13px;font-weight:600">NFC-e</span>
       </button>
@@ -6171,6 +6211,7 @@ async function nfceCancelarConfirmar(id){
 }
 
 // ── Nova NFC-e — abrir formulário ─────────────────────────────────
+function openNovaVendaNfce(){ abrirNovaNfce(); }
 function abrirNovaNfce(){
   nav('nfce_emissao');
 }
@@ -6179,14 +6220,13 @@ function abrirNovaNfce(){
 // NFC-e EMISSÃO — formulário de nova nota
 // ════════════════════════════════════════════════════
 pages.nfce_emissao=async()=>{
-  const cfg=await api('nfce_config').catch(()=>({}));
-  document.getElementById('topbar-actions').innerHTML=`
-    <button class="btn btn-ghost" onclick="nav('vendas_nfce')" style="gap:6px">
-      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="width:14px;height:14px"><polyline points="15 18 9 12 15 6"/></svg>
-      Voltar
-    </button>`;
+  // Mantido para compatibilidade — abrirNovaNfce() usa openNfceModal()
+  await openNfceModal();
+};
 
-  document.getElementById('content').innerHTML=`
+async function openNfceModal(){
+  const cfg=await api('nfce_config').catch(()=>({}));
+  openModal('xl','Emitir NFC-e',`
     <div>
       <form onsubmit="return false">
 
@@ -6299,156 +6339,20 @@ pages.nfce_emissao=async()=>{
 
       <!-- Botões -->
       <div style="display:flex;gap:10px;justify-content:flex-end">
-        <button type="button" class="btn btn-ghost" onclick="nav('vendas_nfce')">Cancelar</button>
-        <button type="button" class="btn btn-primary" style="gap:8px;padding:10px 24px" onclick="nfceTransmitir()">
-          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="width:15px;height:15px"><line x1="22" y1="2" x2="11" y2="13"/><polygon points="22 2 15 22 11 13 2 9 22 2"/></svg>
-          Transmitir NFC-e
-        </button>
-      </div>
       </form>
-    </div>`;
-
-  // Adicionar primeiro item automaticamente
+    </div>`,
+    `<button class="btn btn-ghost" onclick="closeModal()">Cancelar</button>
+     <button class="btn btn-primary" style="gap:8px" onclick="nfceTransmitir()">
+       <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="width:14px;height:14px"><line x1="22" y1="2" x2="11" y2="13"/><polygon points="22 2 15 22 11 13 2 9 22 2"/></svg>
+       Transmitir NFC-e
+     </button>`
+  );
+  // Inicializar itens
   nfceItens=[];
   nfceAddItem();
-};
-
-let nfceItens=[];
-
-function nfceAddItem(){
-  const idx=nfceItens.length;
-  nfceItens.push({descricao:'',ncm:'',cfop:'5102',csosn:'102',unidade:'UN',quantidade:1,valor_unitario:0});
-  nfceRenderItens();
 }
 
-function nfceRemoveItem(idx){
-  nfceItens.splice(idx,1);
-  nfceRenderItens();
-}
 
-function nfceItemChange(idx,campo,val){
-  nfceItens[idx][campo]=val;
-  if(campo==='quantidade'||campo==='valor_unitario') nfceAtualizarTotal();
-}
-
-function nfceRenderItens(){
-  const tbody=document.getElementById('nfce-itens-body');
-  if(!tbody) return;
-  tbody.innerHTML=nfceItens.map((it,i)=>`
-    <tr>
-      <td style="min-width:220px">
-        <input type="text" value="${escHtml(it.descricao)}" placeholder="Digite para buscar..."
-          autocomplete="off"
-          oninput="nfceTabDescSearch(this,${i})"
-          onfocus="nfceTabDescSearch(this,${i})"
-          onblur="setTimeout(()=>nfceTabDropFechar(),200)"
-          style="width:100%;padding:5px 8px;border:1px solid var(--border);border-radius:4px;background:var(--surface);color:var(--text);font-size:13px"/>
-      </td>
-      <td><input type="text" value="${escHtml(it.ncm)}" placeholder="00000000" maxlength="8" data-no-cap="1"
-        oninput="nfceItemChange(${i},'ncm',this.value)"
-        style="width:90px;padding:5px 8px;border:1px solid var(--border);border-radius:4px;background:var(--surface);color:var(--text);font-size:13px;text-align:center"/></td>
-      <td><input type="text" value="${escHtml(it.cfop)}" maxlength="5" data-no-cap="1"
-        oninput="nfceItemChange(${i},'cfop',this.value)"
-        style="width:70px;padding:5px 8px;border:1px solid var(--border);border-radius:4px;background:var(--surface);color:var(--text);font-size:13px;text-align:center"/></td>
-      <td>
-        <select onchange="nfceItemChange(${i},'csosn',this.value)"
-          style="padding:5px 8px;border:1px solid var(--border);border-radius:4px;background:var(--surface);color:var(--text);font-size:13px">
-          <option value="101" ${it.csosn==='101'?'selected':''}>101 – Tributada com permissão de crédito</option>
-          <option value="102" ${it.csosn==='102'?'selected':''}>102 – Tributada sem permissão de crédito</option>
-          <option value="103" ${it.csosn==='103'?'selected':''}>103 – Isenção do ICMS para faixa de receita bruta</option>
-          <option value="201" ${it.csosn==='201'?'selected':''}>201 – ST com permissão de crédito</option>
-          <option value="202" ${it.csosn==='202'?'selected':''}>202 – ST sem permissão de crédito</option>
-          <option value="203" ${it.csosn==='203'?'selected':''}>203 – ST com isenção para faixa de receita bruta</option>
-          <option value="300" ${it.csosn==='300'?'selected':''}>300 – Imune</option>
-          <option value="400" ${it.csosn==='400'?'selected':''}>400 – Não tributada</option>
-          <option value="500" ${it.csosn==='500'?'selected':''}>500 – ICMS cobrado anteriormente por substituição tributária (substituído) ou por antecipação</option>
-          <option value="900" ${it.csosn==='900'?'selected':''}>900 – Outros</option>
-        </select>
-      </td>
-      <td><input type="text" value="${escHtml(it.unidade)}" maxlength="6"
-        oninput="nfceItemChange(${i},'unidade',this.value)"
-        style="width:60px;padding:5px 8px;border:1px solid var(--border);border-radius:4px;background:var(--surface);color:var(--text);font-size:13px;text-align:center"/></td>
-      <td><input type="number" value="${it.quantidade}" min="0.001" step="0.001"
-        oninput="nfceItemChange(${i},'quantidade',parseFloat(this.value)||1);nfceAtualizarTotal()"
-        style="width:80px;padding:5px 8px;border:1px solid var(--border);border-radius:4px;background:var(--surface);color:var(--text);font-size:13px;text-align:right"/></td>
-      <td><input type="number" value="${it.valor_unitario}" min="0" step="0.01"
-        oninput="nfceItemChange(${i},'valor_unitario',parseFloat(this.value)||0);nfceAtualizarTotal()"
-        style="width:100px;padding:5px 8px;border:1px solid var(--border);border-radius:4px;background:var(--surface);color:var(--text);font-size:13px;text-align:right"/></td>
-      <td style="text-align:right;font-weight:600;font-size:13px;padding-right:12px">
-        R$ ${((it.quantidade||1)*(it.valor_unitario||0)).toFixed(2).replace('.',',')}
-      </td>
-      <td><button type="button" class="btn btn-ghost btn-icon btn-sm" style="color:var(--danger)" onclick="nfceRemoveItem(${i})">
-        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="width:13px;height:13px"><polyline points="3 6 5 6 21 6"/><path d="M19 6l-1 14a2 2 0 01-2 2H8a2 2 0 01-2-2L5 6"/><path d="M10 11v6M14 11v6"/></svg>
-      </button></td>
-    </tr>`).join('');
-  nfceAtualizarTotal();
-}
-
-function nfceAtualizarTotal(){
-  const subtotal=nfceItens.reduce((s,it)=>s+(parseFloat(it.quantidade)||1)*(parseFloat(it.valor_unitario)||0),0);
-  const desc=parseFloat(document.getElementById('nfe-desconto')?.value)||0;
-  const total=Math.max(0,subtotal-desc);
-  const el=document.getElementById('nfce-total-display');
-  if(el) el.textContent=total.toFixed(2).replace('.',',');
-}
-
-async function nfceTransmitir(){
-  // Validações básicas
-  const itensValidos=nfceItens.filter(it=>it.descricao.trim());
-  if(itensValidos.length===0) return toast('Adicione ao menos um item com descrição','error');
-  const certSenha = document.getElementById('nfe-cert-senha')?.value||'';
-  if(!certSenha) return toast('Informe a senha do certificado digital','error');
-
-  const subtotal=nfceItens.reduce((s,it)=>s+(parseFloat(it.quantidade)||1)*(parseFloat(it.valor_unitario)||0),0);
-  const desconto=parseFloat(document.getElementById('nfe-desconto')?.value)||0;
-  const total=Math.max(0,subtotal-desconto);
-
-  const tPag=document.getElementById('nfe-pag-tipo')?.value||'01';
-  const destNome=document.getElementById('nfe-dest-nome')?.value?.trim()||'';
-  const destDoc=document.getElementById('nfe-dest-doc')?.value?.trim().replace(/\D/g,'')||'';
-
-  const body={
-    cert_senha:  certSenha,
-    ambiente:    document.getElementById('nfe-ambiente')?.value||'homologacao',
-    natop:       document.getElementById('nfe-natop')?.value||'VENDA AO CONSUMIDOR',
-    desconto:    desconto,
-    valor_total: total,
-    formas_pagamento:[{tipo:tPag,valor:total}],
-    cliente_nome: destNome||'CONSUMIDOR',
-    cliente_cpf:  destDoc.length===11?destDoc:'',
-    cliente_cnpj: destDoc.length===14?destDoc:'',
-    itens: itensValidos.map((it,i)=>({
-      codigo:         String(i+1).padStart(4,'0'),
-      descricao:      it.descricao,
-      ncm:            (it.ncm||'00000000').replace(/\D/g,'').padStart(8,'0'),
-      cfop:           it.cfop||'5949',
-      csosn:          it.csosn||'400',
-      unidade:        it.unidade||'UN',
-      quantidade:     parseFloat(it.quantidade)||1,
-      valor_unitario: parseFloat(it.valor_unitario)||0,
-      valor_total:    (parseFloat(it.quantidade)||1)*(parseFloat(it.valor_unitario)||0),
-      origem:         0,
-    })),
-  };
-
-  try{
-    toast('Transmitindo NFC-e...','info');
-    const r=await api('nfce','','POST',body);
-    if(r.autorizada||r.ok){
-      toast('NFC-e autorizada! Protocolo: '+(r.nProt||r.n_prot||''),'success');
-      nav('vendas_nfce');
-    } else {
-      const cStat  = r.cStat  ? ` [cStat ${r.cStat}]` : '';
-      const motivo = r.xMotivo || r.error || 'Erro desconhecido';
-      toast('Nota rejeitada: ' + motivo + cStat, 'error');
-    }
-  }catch(e){
-    toast(e.message||'Erro ao transmitir','error');
-  }
-}
-
-// ── EMPRESA / CONFIGURAÇÕES ─────────
-// ── CERTIFICADO DIGITAL ──────────────
 pages.certificado=async()=>{
   const e=await api('empresa');
   document.getElementById('topbar-actions').innerHTML='';
@@ -6494,6 +6398,62 @@ function certSelecionarArquivo(input){
   const label=document.getElementById('cert-file-label');
   if(label&&input.files[0]) label.textContent='📎 '+input.files[0].name;
 }
+async function nfceTransmitir(){
+  const itensValidos=nfceItens.filter(it=>it.descricao.trim());
+  if(itensValidos.length===0) return toast('Adicione ao menos um item com descrição','error');
+  const certSenha = document.getElementById('nfe-cert-senha')?.value||'';
+  if(!certSenha) return toast('Informe a senha do certificado digital','error');
+
+  const subtotal=nfceItens.reduce((s,it)=>s+(parseFloat(it.quantidade)||1)*(parseFloat(it.valor_unitario)||0),0);
+  const desconto=parseFloat(document.getElementById('nfe-desconto')?.value)||0;
+  const total=Math.max(0,subtotal-desconto);
+
+  const tPag=document.getElementById('nfe-pag-tipo')?.value||'01';
+  const destNome=document.getElementById('nfe-dest-nome')?.value?.trim()||'';
+  const destDoc=document.getElementById('nfe-dest-doc')?.value?.trim().replace(/\D/g,'')||'';
+
+  const body={
+    cert_senha:  certSenha,
+    ambiente:    document.getElementById('nfe-ambiente')?.value||'homologacao',
+    natop:       document.getElementById('nfe-natop')?.value||'VENDA AO CONSUMIDOR',
+    desconto:    desconto,
+    valor_total: total,
+    formas_pagamento:[{tipo:tPag,valor:total}],
+    cliente_nome: destNome||'CONSUMIDOR',
+    cliente_cpf:  destDoc.length===11?destDoc:'',
+    cliente_cnpj: destDoc.length===14?destDoc:'',
+    itens: itensValidos.map((it,i)=>({
+      codigo:         String(i+1).padStart(4,'0'),
+      descricao:      it.descricao,
+      ncm:            (it.ncm||'00000000').replace(/\D/g,'').padStart(8,'0'),
+      cfop:           it.cfop||'5949',
+      csosn:          it.csosn||'400',
+      unidade:        it.unidade||'UN',
+      quantidade:     parseFloat(it.quantidade)||1,
+      valor_unitario: parseFloat(it.valor_unitario)||0,
+      valor_total:    (parseFloat(it.quantidade)||1)*(parseFloat(it.valor_unitario)||0),
+      origem:         0,
+    })),
+  };
+
+  try{
+    toast('Transmitindo NFC-e...','info');
+    const r=await api('nfce','','POST',body);
+    if(r.autorizada||r.ok){
+      toast('NFC-e autorizada! Protocolo: '+(r.nProt||r.n_prot||''),'success');
+      closeModal();
+      if(currentPage==='vendas_nfce' && typeof renderNfceList==='function') renderNfceList();
+      else nav('vendas_nfce');
+    } else {
+      const cStat  = r.cStat  ? ` [cStat ${r.cStat}]` : '';
+      const motivo = r.xMotivo || r.error || 'Erro desconhecido';
+      toast('Nota rejeitada: ' + motivo + cStat, 'error');
+    }
+  }catch(e){
+    toast(e.message||'Erro ao transmitir','error');
+  }
+}
+
 async function certImportarConfirmar(){
   const input=_certFileInput||document.getElementById('cert-file-input');
   if(!input||!input.files[0]){ toast('Selecione o arquivo .pfx ou .p12 primeiro','error'); return; }
@@ -6828,12 +6788,14 @@ async function renderFinanceiro() {
     _fin.categorias = cats || [];
     _fin.contas_bancarias = cbs || [];
   } catch(e) {}
+  // Botão na topbar — padrão dos outros módulos
+  document.getElementById('topbar-actions').innerHTML =
+    '<button class="btn btn-primary btn-sm" id="fin-btn-novo">'
+    +'<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" style="width:14px;height:14px"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>'
+    +' Novo Lançamento</button>';
+  document.getElementById('fin-btn-novo').onclick = function(){ finModalLancamento(_fin.aba === 'pagar' ? 'pagar' : 'receber'); };
   const el = document.getElementById('content');
   el.innerHTML = '<div style="padding:20px">'
-    +'<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:18px">'
-    +'<h2 style="font-family:var(--font-head);font-weight:800;font-size:20px">Financeiro</h2>'
-    +'<button class="btn btn-primary btn-sm" id="fin-btn-novo">+ Novo Lançamento</button>'
-    +'</div>'
     +'<div class="fin-tabs">'
     +'<div class="fin-tab active" id="fin-tab-receber" onclick="finSetAba(\'receber\')">💰 A Receber</div>'
     +'<div class="fin-tab" id="fin-tab-pagar" onclick="finSetAba(\'pagar\')">📤 A Pagar</div>'
@@ -6841,10 +6803,10 @@ async function renderFinanceiro() {
     +'</div>'
     +'<div id="fin-conteudo"></div>'
     +'</div>';
-  document.getElementById('fin-btn-novo').onclick = function(){ finModalLancamento(_fin.aba === 'pagar' ? 'pagar' : 'receber'); };
   _fin.aba = 'receber';
   await finRenderAba();
 }
+
 
 async function finSetAba(aba) {
   _fin.aba = aba;
@@ -6882,21 +6844,24 @@ function _finCardsPagar(t) {
 
 function _finFiltros(st, key, labels) {
   return '<div class="fin-filters">'
-    +'<input type="text" placeholder="'+labels.busca+'" value="'+escHtml(st.q)+'" oninput="_fin.'+key+'.q=this.value;_fin.'+key+'.page=1" onkeydown="if(event.key===\'Enter\')finRenderAba()" style="min-width:220px"/>'
-    +'<select onchange="_fin.'+key+'.status=this.value;_fin.'+key+'.page=1;finRenderAba()">'
+    +'<input type="text" placeholder="'+labels.busca+'" value="'+escHtml(st.q)+'" oninput="_fin.'+key+'.q=this.value;_fin.'+key+'.page=1" onkeydown="if(event.key===\'Enter\')finRenderAba()" style="flex:1;min-width:180px"/>'
+    +'<select onchange="_fin.'+key+'.status=this.value;_fin.'+key+'.page=1;finRenderAba()" style="width:160px">'
     +'<option value="">Todos os status</option>'
     +'<option value="Aberta" '+(st.status==='Aberta'?'selected':'')+'>Aberto</option>'
     +'<option value="'+labels.pago+'" '+(st.status===labels.pago?'selected':'')+'>'+labels.pagoLabel+'</option>'
     +'<option value="Parcial" '+(st.status==='Parcial'?'selected':'')+'>Parcial</option>'
     +'<option value="Cancelada" '+(st.status==='Cancelada'?'selected':'')+'>Cancelado</option>'
     +'</select>'
-    +'<input type="date" value="'+st.data_ini+'" title="De" onchange="_fin.'+key+'.data_ini=this.value;_fin.'+key+'.page=1;finRenderAba()"/>'
-    +'<input type="date" value="'+st.data_fim+'" title="Até" onchange="_fin.'+key+'.data_fim=this.value;_fin.'+key+'.page=1;finRenderAba()"/>'
-    +'<label style="display:flex;align-items:center;gap:5px;font-size:13px;cursor:pointer">'
+    +'<label style="display:flex;align-items:center;gap:5px;font-size:13px;white-space:nowrap">De'
+    +'<input type="date" value="'+st.data_ini+'" onchange="_fin.'+key+'.data_ini=this.value;_fin.'+key+'.page=1;finRenderAba()" style="width:140px"/>'
+    +'</label>'
+    +'<label style="display:flex;align-items:center;gap:5px;font-size:13px;white-space:nowrap">Até'
+    +'<input type="date" value="'+st.data_fim+'" onchange="_fin.'+key+'.data_fim=this.value;_fin.'+key+'.page=1;finRenderAba()" style="width:140px"/>'
+    +'</label>'
+    +'<label style="display:flex;align-items:center;gap:5px;font-size:13px;cursor:pointer;white-space:nowrap">'
     +'<input type="checkbox" '+(st.vencidas?'checked':'')+' onchange="_fin.'+key+'.vencidas=this.checked;_fin.'+key+'.page=1;finRenderAba()"/> Só vencidas'
     +'</label>'
     +'<button class="btn btn-ghost btn-sm" onclick="_fin.'+key+'.q=\'\';_fin.'+key+'.status=\'\';_fin.'+key+'.data_ini=\'\';_fin.'+key+'.data_fim=\'\';_fin.'+key+'.vencidas=false;_fin.'+key+'.page=1;finRenderAba()">Limpar</button>'
-    +'<button class="btn btn-ghost btn-sm" onclick="finRenderAba()">🔍 Buscar</button>'
     +'</div>';
 }
 
