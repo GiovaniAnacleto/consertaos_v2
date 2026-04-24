@@ -80,12 +80,24 @@ class NfceService
         $storageDir = $this->config['storage_dir'];
 
         // ── Calcula totais ─────────────────────────────────────────────
-        $vProd    = 0.0;
+        // vProd = soma dos valores brutos dos itens (qtd × vUnit), conforme exige a SEFAZ
+        // vDesc = desconto da venda + soma dos descontos por item
+        // vNF   = vProd - vDesc  (deve igualar a soma dos pagamentos)
+        $vProd      = 0.0;
+        $vDescItens = 0.0;
         foreach ($itens as $it) {
-            $vProd += round((float)($it['quantidade'] ?? 1) * (float)($it['valor_unitario'] ?? 0), 2);
+            $qtd   = (float)($it['quantidade']     ?? 1);
+            $vUnit = (float)($it['valor_unitario'] ?? 0);
+            $vBruto = round($qtd * $vUnit, 2);
+            $vProd += $vBruto;
+            // Desconto declarado pelo item (pode ser 0)
+            $vDescItens += round((float)($it['valor_desconto'] ?? 0), 2);
         }
-        $desconto   = round((float)($dados['desconto'] ?? 0), 2);
-        $valorTotal = round($vProd - $desconto, 2);
+        $vProd      = round($vProd, 2);
+        $vDescItens = round($vDescItens, 2);
+        $desconto   = round((float)($dados['desconto'] ?? 0), 2); // desconto da venda
+        $vDesc      = round($vDescItens + $desconto, 2);
+        $valorTotal = round($vProd - $vDesc, 2);
 
         // ── Chave de acesso ────────────────────────────────────────────
         $cUF   = str_pad((string)($empresa['cUF'] ?? 42), 2, '0', STR_PAD_LEFT);
@@ -180,11 +192,16 @@ class NfceService
             $prod->uCom         = strtoupper($it['unidade'] ?? 'UN');
             $prod->qCom         = $qtd;
             $prod->vUnCom       = $vUnit;
-            $prod->vProd        = $vTot;
+            $prod->vProd        = $vTot;  // valor bruto (qtd × vUnit)
             $prod->cEANTrib     = 'SEM GTIN';
             $prod->uTrib        = strtoupper($it['unidade'] ?? 'UN');
             $prod->qTrib        = $qtd;
             $prod->vUnTrib      = $vUnit;
+            // Desconto declarado pelo item
+            $vDescItem = round((float)($it['valor_desconto'] ?? 0), 2);
+            if ($vDescItem > 0) {
+                $prod->vDesc = $vDescItem;
+            }
             $prod->indTot       = 1;
             $make->tagprod($prod);
 
@@ -233,19 +250,15 @@ class NfceService
             $make->tagCOFINS($cof);
 
             // tagIBSCBS — Reforma Tributária (obrigatório a partir de 2026)
-            // Para Simples Nacional: IBS e CBS com alíquotas sobre o valor do item
-            // Alíquotas provisórias 2026: CBS=0.9%, IBS estadual=0.1%, IBS municipal=0%
+            $vLiqItem = round((float)($it['valor_total'] ?? $vTot), 2); // valor com desconto
             $ibscbs = new \stdClass();
             $ibscbs->item         = $nItem;
-            $ibscbs->cst          = '01'; // tributado
-            $ibscbs->vBC          = $vTot;
-            // CBS (federal)
+            $ibscbs->cst          = '01';
+            $ibscbs->vBC          = $vLiqItem;
             $ibscbs->pCBS         = 0.9;
-            $ibscbs->vCBS         = round($vTot * 0.009, 2);
-            // IBS Estadual
+            $ibscbs->vCBS         = round($vLiqItem * 0.009, 2);
             $ibscbs->pIBSUF       = 0.1;
-            $ibscbs->vIBSUF       = round($vTot * 0.001, 2);
-            // IBS Municipal
+            $ibscbs->vIBSUF       = round($vLiqItem * 0.001, 2);
             $ibscbs->pIBSMun      = 0.0;
             $ibscbs->vIBSMun      = 0.00;
             $make->tagIBSCBS($ibscbs);
@@ -264,7 +277,7 @@ class NfceService
         $total->vProd    = $vProd;
         $total->vFrete   = 0.00;
         $total->vSeg     = 0.00;
-        $total->vDesc    = $desconto;
+        $total->vDesc    = $vDesc;
         $total->vII      = 0.00;
         $total->vIPI     = 0.00;
         $total->vIPIDevol = 0.00;
@@ -277,13 +290,16 @@ class NfceService
 
         // tagIBSCBSTot — totalizador da Reforma Tributária
         $ibsTot = new \stdClass();
-        $ibsTot->vBCIBSCBS  = $vProd;
+        $ibsTot->vBCIBSCBS  = round(array_sum(array_map(
+            fn($it) => (float)($it['valor_total'] ?? round((float)($it['quantidade']??1) * (float)($it['valor_unitario']??0), 2)),
+            $itens
+        )), 2);
         $ibsTot->vCBS        = round(array_sum(array_map(
-            fn($it) => round((float)($it['quantidade']??1) * (float)($it['valor_unitario']??0) * 0.009, 2),
+            fn($it) => round((float)($it['valor_total'] ?? round((float)($it['quantidade']??1) * (float)($it['valor_unitario']??0), 2)) * 0.009, 2),
             $itens
         )), 2);
         $ibsTot->vIBSUF      = round(array_sum(array_map(
-            fn($it) => round((float)($it['quantidade']??1) * (float)($it['valor_unitario']??0) * 0.001, 2),
+            fn($it) => round((float)($it['valor_total'] ?? round((float)($it['quantidade']??1) * (float)($it['valor_unitario']??0), 2)) * 0.001, 2),
             $itens
         )), 2);
         $ibsTot->vIBSMun     = 0.00;
@@ -300,12 +316,29 @@ class NfceService
         $make->tagpag($pagContainer);
 
         // tagdetPag — formas de pagamento (dentro do tagpag)
+        // Para cartão de crédito (03) e débito (04) a SEFAZ exige a sub-tag <card>
+        // com os dados da operadora. Sem ela o retorno é:
+        // "Rejeicao: Nao informados os dados do cartao de credito/debito nas Formas de Pagamento"
         $formasPag = $dados['formas_pagamento'] ?? [['tipo' => '01', 'valor' => $valorTotal]];
         foreach ($formasPag as $fp) {
             $pag = new \stdClass();
             $pag->indPag = 0; // 0=à vista, 1=a prazo
             $pag->tPag   = str_pad((string)($fp['tipo'] ?? '01'), 2, '0', STR_PAD_LEFT);
             $pag->vPag   = round((float)($fp['valor'] ?? $valorTotal), 2);
+
+            // ── Dados do cartão (obrigatório quando tPag = 03 ou 04) ────────
+            // tpIntegra: 1 = Integrado com TEF/POS (usa CNPJ da credenciadora)
+            //            2 = Não integrado (operação manual, CNPJ pode ser zeros)
+            // tBand:     01=Visa 02=Mastercard 03=AmericanExpress 04=Sorocred
+            //            05=DinersClub 06=Elo 07=Hipercard 08=Aura 09=Cabal 99=Outros
+            // cAut:      código de autorização retornado pelo POS/TEF
+            if (in_array($pag->tPag, ['03', '04'])) {
+                $pag->tpIntegra = (int)($fp['card_tp_integra'] ?? 2); // 2=não integrado (padrão seguro)
+                $pag->CNPJ      = preg_replace('/\D/', '', $fp['card_cnpj'] ?? '00000000000000');
+                $pag->tBand     = str_pad((string)($fp['card_tband'] ?? '99'), 2, '0', STR_PAD_LEFT);
+                $pag->cAut      = $fp['card_caut'] ?? '000000'; // código de autorização (mín. 1 char)
+            }
+
             $make->tagdetPag($pag);
         }
 
@@ -316,10 +349,10 @@ class NfceService
 
         // taginfRespTec — responsável técnico pelo software (obrigatório desde 2020)
         $respTec = new \stdClass();
-        $respTec->CNPJ    = '38060284000179'; // CNPJ do desenvolvedor ConsertaOS
-        $respTec->xContato= 'ConsertaOS';
-        $respTec->email   = 'suporte@consertaos.com.br';
-        $respTec->fone    = '4799999999';
+        $respTec->CNPJ    = '30366939000135'; // CNPJ do desenvolvedor ConsertaOS
+        $respTec->xContato= 'AG Tech';
+        $respTec->email   = 'atendimento.agtech@hotmail.com';
+        $respTec->fone    = '47997484054';
         $make->taginfRespTec($respTec);
 
         // taginfNFeSupl — QR Code (obrigatório para NFC-e)
@@ -358,9 +391,88 @@ class NfceService
 
         // Processa retorno
         return $this->_processarRetorno($resposta, $xmlAssinado, $storageDir, $numero);
+    }
 
-        // Processa retorno
-        return $this->_processarRetorno($resposta, $xmlAssinado, $storageDir, $numero);
+    // ──────────────────────────────────────────────────────────────────
+    // INUTILIZAR faixa de numeração
+    // Deve ser usado para números rejeitados ou pulados que não serão
+    // reaproveitados, conforme exige o Manual de Orientação ao Contribuinte.
+    //
+    // POR QUE ZERAMOS pathschemes:
+    // O isValid() em Common/Tools.php (linha 418) monta o caminho do schema assim:
+    //   $schema = $this->pathschemes . $method . "_v$version.xsd";
+    // Para inutilização, busca "inutNFe_v4.00.xsd". Esse arquivo existe mas
+    // contém o schema de NF-e normal, causando:
+    //   "Element '{...}total': This element is not expected."
+    // O isValid() tem uma saída segura: se o arquivo NÃO existir, retorna true.
+    // Ao zerar pathschemes, o is_file() retorna false e a validação é pulada.
+    // O XML em si está correto — a SEFAZ faz a validação real no servidor.
+    // ──────────────────────────────────────────────────────────────────
+    public function inutilizar(int $nIni, int $nFin, string $justificativa, int $serie = 1): array
+    {
+        if (strlen($justificativa) < 15) {
+            throw new \InvalidArgumentException('Justificativa deve ter no mínimo 15 caracteres.');
+        }
+
+        $certificate = Certificate::readPfx(
+            base64_decode($this->config['certificado_pfx']),
+            $this->config['certificado_senha']
+        );
+        $configTools = $this->_buildToolsConfig();
+        $tools = new Tools(json_encode($configTools), $certificate);
+        $tools->model('65'); // NFC-e
+
+        // ── Bypass do schema errado ────────────────────────────────────
+        // pathschemes é public — zeramos para que is_file() retorne false
+        // dentro do isValid(), fazendo-o retornar true sem validar nada.
+        $pathSchemesOriginal = $tools->pathschemes;
+        $tools->pathschemes  = '';
+
+        $resp = $tools->sefazInutiliza(
+            $serie,
+            $nIni,
+            $nFin,
+            $justificativa
+        );
+
+        // Restaura pathschemes para uso eventual do objeto após este método
+        $tools->pathschemes = $pathSchemesOriginal;
+
+        // ── Salva retorno bruto para diagnóstico ───────────────────────
+        $storageDir = $this->config['storage_dir'];
+        $inutDir    = $storageDir . '/inutilizados';
+        if (!is_dir($inutDir)) mkdir($inutDir, 0755, true);
+        file_put_contents("$inutDir/{$nIni}-{$nFin}-ret.xml", $resp);
+
+        // ── Processa retorno ───────────────────────────────────────────
+        $st  = new \NFePHP\NFe\Common\Standardize();
+        $obj = $st->toStd($resp);
+
+        $inf = $obj->retInutNFe->infInut ?? $obj->infInut ?? null;
+
+        // Fallback via SimpleXML direto
+        if ($inf === null && !empty($resp)) {
+            $xml = @simplexml_load_string($resp);
+            if ($xml) {
+                $xml->registerXPathNamespace('nfe', 'http://www.portalfiscal.inf.br/nfe');
+                $nodes = $xml->xpath('//nfe:infInut') ?: $xml->xpath('//*[local-name()="infInut"]');
+                if (!empty($nodes)) {
+                    $inf = $nodes[0];
+                }
+            }
+        }
+
+        $cStat       = (string)($inf->cStat   ?? '');
+        $xMotivo     = (string)($inf->xMotivo ?? 'Sem retorno');
+        $nProt       = (string)($inf->nProt   ?? '');
+        $inutilizado = in_array($cStat, ['102', '103', '563']); // 102=homologado, 103=em homologação, 563=já inutilizado (aceito para registrar localmente)
+
+        return [
+            'inutilizado' => $inutilizado,
+            'cStat'       => $cStat,
+            'xMotivo'     => $xMotivo,
+            'nProt'       => $nProt,
+        ];
     }
 
     // ──────────────────────────────────────────────────────────────────

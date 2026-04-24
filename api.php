@@ -3,6 +3,9 @@
 // api.php — Backend único do consertaOS
 // =============================================================
 
+// Fuso horário fixo: Brasília (UTC-3)
+date_default_timezone_set('America/Sao_Paulo');
+
 set_exception_handler(function($e) {
     http_response_code(500);
     header('Content-Type: application/json; charset=utf-8');
@@ -13,13 +16,29 @@ set_error_handler(function($errno, $errstr, $errfile, $errline) {
     throw new \ErrorException($errstr, $errno, 0, $errfile, $errline);
 });
 
+// ─── SESSÃO: configurar cookie seguro antes de session_start() ────
+ini_set('session.use_strict_mode', 1);
+ini_set('session.cookie_httponly', 1);
+ini_set('session.cookie_samesite', 'Lax');
 session_start();
+
+// ─── CONFIG (chaves de API e configurações sensíveis) ─────────
+if (file_exists(__DIR__ . '/config.php')) {
+    require_once __DIR__ . '/config.php';
+}
 date_default_timezone_set('America/Sao_Paulo');
 header('Content-Type: application/json; charset=utf-8');
-header('Access-Control-Allow-Origin: *');
+
+// ─── CORS: origem dinâmica para permitir credentials ──────────
+$origin = $_SERVER['HTTP_ORIGIN'] ?? '';
+if ($origin) {
+    header('Access-Control-Allow-Origin: ' . $origin);
+    header('Access-Control-Allow-Credentials: true');
+} else {
+    header('Access-Control-Allow-Origin: *');
+}
 header('Access-Control-Allow-Methods: GET, POST, PUT, DELETE, OPTIONS');
 header('Access-Control-Allow-Headers: Content-Type, Authorization');
-
 if ($_SERVER['REQUEST_METHOD'] === 'OPTIONS') { http_response_code(200); exit; }
 
 // ─── HELPERS ─────────────────────────────────────────────────
@@ -67,14 +86,14 @@ $tables = [
 "CREATE TABLE IF NOT EXISTS produto_fornecedores (id INTEGER PRIMARY KEY AUTOINCREMENT, produto_id INTEGER NOT NULL, fornecedor_nome TEXT DEFAULT '', fornecedor_codigo TEXT DEFAULT '', preco_custo REAL DEFAULT 0, prazo_entrega INTEGER DEFAULT 0, principal INTEGER DEFAULT 0)",
 "CREATE TABLE IF NOT EXISTS produto_composicao (id INTEGER PRIMARY KEY AUTOINCREMENT, produto_id INTEGER NOT NULL, componente_id INTEGER, componente_descricao TEXT DEFAULT '', quantidade REAL DEFAULT 1, unidade TEXT DEFAULT 'UN')",
 "CREATE TABLE IF NOT EXISTS ordens_servico (id INTEGER PRIMARY KEY AUTOINCREMENT, cliente_id INTEGER NOT NULL, tipo_aparelho_id INTEGER, marca_id INTEGER, modelo_id INTEGER, descricao TEXT DEFAULT '', informacoes_adicionais TEXT DEFAULT '', senha_aparelho TEXT DEFAULT '', status TEXT DEFAULT 'Aberta', previsao_conclusao DATE, data_abertura DATETIME DEFAULT CURRENT_TIMESTAMP, data_atualizacao DATETIME DEFAULT CURRENT_TIMESTAMP)",
-"CREATE TABLE IF NOT EXISTS orcamentos (id INTEGER PRIMARY KEY AUTOINCREMENT, ordem_id INTEGER NOT NULL, observacoes TEXT DEFAULT '', valor REAL DEFAULT 0, status_orcamento TEXT DEFAULT 'Pendente')",
+"CREATE TABLE IF NOT EXISTS orcamentos (id INTEGER PRIMARY KEY AUTOINCREMENT, ordem_id INTEGER NOT NULL, produto_id INTEGER DEFAULT NULL, observacoes TEXT DEFAULT '', valor REAL DEFAULT 0, status_orcamento TEXT DEFAULT 'Pendente')",
 "CREATE TABLE IF NOT EXISTS midias_os (id INTEGER PRIMARY KEY AUTOINCREMENT, ordem_id INTEGER NOT NULL, caminho TEXT NOT NULL, tipo TEXT DEFAULT '', comentario TEXT DEFAULT '', data_upload DATETIME DEFAULT CURRENT_TIMESTAMP)",
 "CREATE TABLE IF NOT EXISTS ordem_observacoes (id INTEGER PRIMARY KEY AUTOINCREMENT, ordem_id INTEGER NOT NULL, usuario_id INTEGER, observacao TEXT NOT NULL, data_criacao DATETIME DEFAULT CURRENT_TIMESTAMP)",
 "CREATE TABLE IF NOT EXISTS notificacoes (id INTEGER PRIMARY KEY AUTOINCREMENT, ordem_id INTEGER, novo_status TEXT DEFAULT '', lida INTEGER DEFAULT 0, data_notificacao DATETIME DEFAULT CURRENT_TIMESTAMP)",
 "CREATE TABLE IF NOT EXISTS contas_bancarias (id INTEGER PRIMARY KEY AUTOINCREMENT, nome TEXT NOT NULL, banco TEXT DEFAULT '', agencia TEXT DEFAULT '', conta TEXT DEFAULT '', tipo TEXT DEFAULT 'corrente', ativo INTEGER DEFAULT 1)",
 "CREATE TABLE IF NOT EXISTS operadoras_cartao (id INTEGER PRIMARY KEY AUTOINCREMENT, nome TEXT NOT NULL, tipo TEXT DEFAULT 'credito', taxa_padrao REAL DEFAULT 0, prazo_repasse INTEGER DEFAULT 30, ativo INTEGER DEFAULT 1)",
 "CREATE TABLE IF NOT EXISTS formas_pagamento (id INTEGER PRIMARY KEY AUTOINCREMENT, nome TEXT NOT NULL, tipo TEXT DEFAULT 'dinheiro', modalidade TEXT DEFAULT 'a_vista', parcelas_padrao INTEGER DEFAULT 1, intervalo_dias INTEGER DEFAULT 30, juros_am REAL DEFAULT 0, taxa_fixa REAL DEFAULT 0, tipo_repeticao TEXT DEFAULT 'mensal', lancar_financeiro INTEGER DEFAULT 1, confirmar_auto INTEGER DEFAULT 0, conta_bancaria TEXT DEFAULT '', operadora TEXT DEFAULT '', taxa_operadora REAL DEFAULT 0, ativo INTEGER DEFAULT 1)",
-"CREATE TABLE IF NOT EXISTS vendas (id INTEGER PRIMARY KEY AUTOINCREMENT, cliente_id INTEGER, vendedor_id INTEGER, os_id INTEGER, cpf_cnpj TEXT DEFAULT '', data_criacao DATETIME DEFAULT CURRENT_TIMESTAMP, data_confirmacao DATETIME, status TEXT DEFAULT 'Paga', total REAL DEFAULT 0, desconto_valor REAL DEFAULT 0, desconto_percentual REAL DEFAULT 0, desconto_tipo TEXT DEFAULT 'valor', acrescimo_valor REAL DEFAULT 0, acrescimo_percentual REAL DEFAULT 0, acrescimo_tipo TEXT DEFAULT 'valor', valor_frete REAL DEFAULT 0, observacoes TEXT DEFAULT '')",
+"CREATE TABLE IF NOT EXISTS vendas (id INTEGER PRIMARY KEY AUTOINCREMENT, cliente_id INTEGER, vendedor_id INTEGER, os_id INTEGER, cpf_cnpj TEXT DEFAULT '', data_criacao DATETIME DEFAULT CURRENT_TIMESTAMP, data_confirmacao DATETIME, status TEXT DEFAULT 'Digitação', total REAL DEFAULT 0, desconto_valor REAL DEFAULT 0, desconto_percentual REAL DEFAULT 0, desconto_tipo TEXT DEFAULT 'valor', acrescimo_valor REAL DEFAULT 0, acrescimo_percentual REAL DEFAULT 0, acrescimo_tipo TEXT DEFAULT 'valor', valor_frete REAL DEFAULT 0, observacoes TEXT DEFAULT '')",
 "CREATE TABLE IF NOT EXISTS venda_faturamentos (id INTEGER PRIMARY KEY AUTOINCREMENT, venda_id INTEGER NOT NULL, forma_pagamento_id INTEGER, forma_pagamento_nome TEXT DEFAULT '', valor_total REAL DEFAULT 0, valor_pago REAL DEFAULT 0, num_parcelas INTEGER DEFAULT 1, data_primeira_parcela DATE, intervalo_dias INTEGER DEFAULT 30, juros_am REAL DEFAULT 0, taxa_fixa REAL DEFAULT 0, tipo_repeticao TEXT DEFAULT 'mensal', observacoes TEXT DEFAULT '')",
 "CREATE TABLE IF NOT EXISTS venda_parcelas (id INTEGER PRIMARY KEY AUTOINCREMENT, faturamento_id INTEGER NOT NULL, venda_id INTEGER, numero INTEGER DEFAULT 1, valor REAL DEFAULT 0, valor_juros REAL DEFAULT 0, valor_taxa REAL DEFAULT 0, data_vencimento DATE, data_pagamento DATE, status TEXT DEFAULT 'Aberta')",
 "CREATE TABLE IF NOT EXISTS venda_items (id INTEGER PRIMARY KEY AUTOINCREMENT, venda_id INTEGER, produto_id INTEGER, descricao TEXT DEFAULT '', quantidade REAL DEFAULT 1, valor_unitario REAL DEFAULT 0, desconto_valor REAL DEFAULT 0, desconto_percentual REAL DEFAULT 0, acrescimo_valor REAL DEFAULT 0, subtotal REAL DEFAULT 0)",
@@ -86,11 +105,15 @@ $tables = [
 "CREATE TABLE IF NOT EXISTS notas_fiscais_entrada (id INTEGER PRIMARY KEY AUTOINCREMENT, numero TEXT DEFAULT '', serie TEXT DEFAULT '', chave_acesso TEXT NOT NULL DEFAULT '', fornecedor_id INTEGER, fornecedor_nome TEXT DEFAULT '', fornecedor_cnpj TEXT DEFAULT '', data_emissao DATE, data_entrada DATE, valor_total REAL DEFAULT 0, valor_bc_icms REAL DEFAULT 0, valor_icms REAL DEFAULT 0, valor_bc_icms_st REAL DEFAULT 0, valor_icms_st REAL DEFAULT 0, valor_ii REAL DEFAULT 0, valor_pis_st REAL DEFAULT 0, valor_cofins_st REAL DEFAULT 0, comple_icms REAL DEFAULT 0, valor_liquido REAL DEFAULT 0, valor_servico REAL DEFAULT 0, valor_ipi REAL DEFAULT 0, valor_pis REAL DEFAULT 0, valor_cofins REAL DEFAULT 0, valor_frete REAL DEFAULT 0, valor_desconto REAL DEFAULT 0, status TEXT DEFAULT 'Recebida', observacoes TEXT DEFAULT '', xml_conteudo TEXT DEFAULT '', data_importacao DATETIME DEFAULT CURRENT_TIMESTAMP)",
 "CREATE TABLE IF NOT EXISTS nfe_items (id INTEGER PRIMARY KEY AUTOINCREMENT, nfe_id INTEGER NOT NULL, codigo_produto TEXT DEFAULT '', descricao TEXT NOT NULL, ncm TEXT DEFAULT '', cfop TEXT DEFAULT '', unidade TEXT DEFAULT 'UN', quantidade REAL DEFAULT 1, valor_unitario REAL DEFAULT 0, valor_total REAL DEFAULT 0, valor_icms REAL DEFAULT 0, valor_ipi REAL DEFAULT 0, valor_pis REAL DEFAULT 0, valor_cofins REAL DEFAULT 0)",
 "CREATE TABLE IF NOT EXISTS nfce_emitidas (id INTEGER PRIMARY KEY AUTOINCREMENT, os_id INTEGER, venda_id INTEGER, n_prot TEXT DEFAULT '', status TEXT DEFAULT 'Aguardando', numero TEXT DEFAULT '', serie TEXT DEFAULT '', chave_acesso TEXT DEFAULT '', valor_total REAL DEFAULT 0, danfe_url TEXT DEFAULT '', xml_url TEXT DEFAULT '', motivo_rejeicao TEXT DEFAULT '', ambiente TEXT DEFAULT 'Homologacao', payload_json TEXT DEFAULT '', data_emissao DATETIME DEFAULT CURRENT_TIMESTAMP, data_atualizacao DATETIME DEFAULT CURRENT_TIMESTAMP)",
+"CREATE TABLE IF NOT EXISTS nfse_emitidas (id INTEGER PRIMARY KEY AUTOINCREMENT, os_id INTEGER, venda_id INTEGER, status TEXT DEFAULT 'Aguardando', numero TEXT DEFAULT '', serie TEXT DEFAULT '1', codigo_verificacao TEXT DEFAULT '', valor_total REAL DEFAULT 0, link_pdf TEXT DEFAULT '', motivo_rejeicao TEXT DEFAULT '', ambiente TEXT DEFAULT 'homologacao', payload_json TEXT DEFAULT '', cliente_nome TEXT DEFAULT '', cliente_cpfcnpj TEXT DEFAULT '', data_emissao DATETIME DEFAULT CURRENT_TIMESTAMP, data_atualizacao DATETIME DEFAULT CURRENT_TIMESTAMP)",
 "CREATE TABLE IF NOT EXISTS uploads_temporarios (id INTEGER PRIMARY KEY AUTOINCREMENT, token TEXT UNIQUE, os_id INTEGER, status TEXT DEFAULT 'pendente', data_expiracao DATETIME)",
 // ── FINANCEIRO ──────────────────────────────────────────────────────────────
 "CREATE TABLE IF NOT EXISTS categorias_financeiras (id INTEGER PRIMARY KEY AUTOINCREMENT, nome TEXT NOT NULL, tipo TEXT DEFAULT 'ambos', cor TEXT DEFAULT '#7d8590', ativo INTEGER DEFAULT 1, data_criacao DATETIME DEFAULT CURRENT_TIMESTAMP)",
 "CREATE TABLE IF NOT EXISTS contas_receber (id INTEGER PRIMARY KEY AUTOINCREMENT, origem TEXT DEFAULT 'manual', venda_id INTEGER, parcela_id INTEGER, cliente_id INTEGER, categoria_id INTEGER, conta_bancaria_id INTEGER, descricao TEXT NOT NULL, valor REAL DEFAULT 0, valor_recebido REAL DEFAULT 0, data_emissao DATE, data_vencimento DATE, data_recebimento DATE, status TEXT DEFAULT 'Aberta', documento_ref TEXT DEFAULT '', observacoes TEXT DEFAULT '', data_criacao DATETIME DEFAULT CURRENT_TIMESTAMP, data_atualizacao DATETIME DEFAULT CURRENT_TIMESTAMP)",
 "CREATE TABLE IF NOT EXISTS contas_pagar (id INTEGER PRIMARY KEY AUTOINCREMENT, origem TEXT DEFAULT 'manual', nfe_id INTEGER, fornecedor_id INTEGER, cliente_id INTEGER, categoria_id INTEGER, conta_bancaria_id INTEGER, descricao TEXT NOT NULL, valor REAL DEFAULT 0, valor_pago REAL DEFAULT 0, data_emissao DATE, data_vencimento DATE, data_pagamento DATE, status TEXT DEFAULT 'Aberta', documento_ref TEXT DEFAULT '', observacoes TEXT DEFAULT '', data_criacao DATETIME DEFAULT CURRENT_TIMESTAMP, data_atualizacao DATETIME DEFAULT CURRENT_TIMESTAMP)",
+// ── LOJA VIRTUAL ────────────────────────────────────────────────────────────
+"CREATE TABLE IF NOT EXISTS loja_categorias (id INTEGER PRIMARY KEY AUTOINCREMENT, nome TEXT NOT NULL, descricao TEXT DEFAULT '', ativo INTEGER DEFAULT 1, data_criacao DATETIME DEFAULT CURRENT_TIMESTAMP)",
+"CREATE TABLE IF NOT EXISTS produto_loja (id INTEGER PRIMARY KEY AUTOINCREMENT, produto_id INTEGER NOT NULL UNIQUE, loja_exibir INTEGER DEFAULT 0, loja_titulo TEXT DEFAULT '', loja_descricao TEXT DEFAULT '', loja_categoria_id INTEGER, loja_fotos TEXT DEFAULT '[]', loja_variacoes TEXT DEFAULT '[]', data_atualizacao DATETIME DEFAULT CURRENT_TIMESTAMP)",
 ];
 foreach ($tables as $sql) {
     try { $db->exec($sql); }
@@ -122,12 +145,22 @@ $migrations = [
     ['nfce_emitidas',         'cliente_nome',   "TEXT DEFAULT ''"],
     ['nfce_emitidas',         'cfop',           "TEXT DEFAULT '5949'"],
     ['nfce_emitidas',         'serie',          "TEXT DEFAULT '1'"],
+    ['nfce_emitidas',         'data_envio',     "DATETIME DEFAULT NULL"],
+    ['nfce_emitidas',         'os_vinculada',   "TEXT DEFAULT ''"],
     ['empresa_dados',        'nfce_cuf',       "TEXT DEFAULT '42'"],
     ['empresa_dados',        'nfce_cert_senha',"TEXT DEFAULT ''"],
     ['empresa_dados',        'nfce_csc_id',    "TEXT DEFAULT '01'"],
     ['empresa_dados',        'nfce_ambiente',  "TEXT DEFAULT 'homologacao'"],
     ['empresa_dados',        'nfce_serie',     "TEXT DEFAULT '1'"],
     ['empresa_dados',        'nfce_proximo_numero', "INTEGER DEFAULT 1"],
+    // ── NFS-e (IPM/Atende.Net) ──────────────────────────────────────────────
+    ['empresa_dados',        'nfse_usuario',         "TEXT DEFAULT ''"],      // CNPJ do prestador (login IPM)
+    ['empresa_dados',        'nfse_senha',           "TEXT DEFAULT ''"],      // senha do portal da prefeitura
+    ['empresa_dados',        'nfse_cidade_tom',      "TEXT DEFAULT '8416'"], // código TOM de Chapadão do Lageado/SC confirmado
+    ['empresa_dados',        'nfse_serie',           "TEXT DEFAULT '1'"],     // série padrão confirmada: 1
+    ['empresa_dados',        'nfse_ambiente',        "TEXT DEFAULT 'homologacao'"],
+    ['empresa_dados',        'nfse_proximo_numero',  "INTEGER DEFAULT 1"],
+    ['empresa_dados',        'nfse_usa_unidade',     "INTEGER DEFAULT 0"],    // 1=envia bloco unidade no XML, 0=omite
     ['empresa_dados',        'enotas_api_key', "TEXT DEFAULT ''"],
     ['empresa_dados',        'enotas_empresa_id', "TEXT DEFAULT ''"],
     ['empresa_dados',        'enotas_ambiente', "TEXT DEFAULT 'Homologacao'"],
@@ -155,11 +188,13 @@ $migrations = [
     ['contas_receber',  'valor_recebido',   'REAL DEFAULT 0'],
     ['contas_receber',  'conta_bancaria_id','INTEGER'],
     ['contas_receber',  'documento_ref',    "TEXT DEFAULT ''"],
+    ['contas_receber',  'cliente_nome_manual', "TEXT DEFAULT ''"],
     ['contas_pagar',    'valor_pago',       'REAL DEFAULT 0'],
     ['contas_pagar',    'conta_bancaria_id','INTEGER'],
     ['contas_pagar',    'documento_ref',    "TEXT DEFAULT ''"],
     ['contas_pagar',    'cliente_id',       'INTEGER'],
     ['venda_items',     'descricao',        "TEXT DEFAULT ''"],
+    ['orcamentos',      'produto_id',       'INTEGER DEFAULT NULL'],
     ['ordens_servico',  'informacoes_adicionais', "TEXT DEFAULT ''"],
     ['ordens_servico',  'senha_aparelho',   "TEXT DEFAULT ''"],
     ['ordens_servico',  'previsao_conclusao', 'DATE'],
@@ -239,6 +274,8 @@ $migrations = [
     ['produtos',         'codigo_nbs',               "TEXT DEFAULT ''"],
     ['produtos',         'iss_percentual',           'REAL DEFAULT 0'],
     ['produtos',         'nfse_natureza',            "TEXT DEFAULT 'tributacao_municipio'"],
+    ['produtos',         'nfse_unidade_codigo',      "TEXT DEFAULT '64'"],  // código IPM da unidade (64=UN, 30=HR)
+    ['nfse_emitidas',    'serie',                    "TEXT DEFAULT '1'"],    // série corrigida: 1
     ['produtos',         'nfse_incentivo_fiscal',    "TEXT DEFAULT 'nao'"],
     ['produtos',         'despesas_acessorias',      'REAL DEFAULT 0'],
     ['produtos',         'outras_despesas',          'REAL DEFAULT 0'],
@@ -272,6 +309,22 @@ $migrations = [
     ['formas_pagamento', 'conta_bancaria',  "TEXT DEFAULT ''"],
     ['formas_pagamento', 'operadora',       "TEXT DEFAULT ''"],
     ['formas_pagamento', 'taxa_operadora',  'REAL DEFAULT 0'],
+    // ── Migrações contas_bancarias ───────────────────────────────────────
+    ['contas_bancarias', 'banco',   "TEXT DEFAULT ''"],
+    ['contas_bancarias', 'agencia', "TEXT DEFAULT ''"],
+    ['contas_bancarias', 'conta',   "TEXT DEFAULT ''"],
+    ['contas_bancarias', 'tipo',    "TEXT DEFAULT 'corrente'"],
+    ['contas_bancarias', 'ativo',   'INTEGER DEFAULT 1'],
+    // ── Migrações Loja Virtual ────────────────────────────────────────────────
+    ['produto_loja', 'loja_exibir',       'INTEGER DEFAULT 0'],
+    ['produto_loja', 'loja_titulo',        "TEXT DEFAULT ''"],
+    ['produto_loja', 'loja_descricao',     "TEXT DEFAULT ''"],
+    ['produto_loja', 'loja_categoria_id',  'INTEGER'],
+    ['produto_loja', 'loja_fotos',         "TEXT DEFAULT '[]'"],
+    ['produto_loja', 'loja_variacoes',     "TEXT DEFAULT '[]'"],
+    ['produto_loja', 'data_atualizacao',   'DATETIME'],
+    ['loja_categorias', 'descricao',       "TEXT DEFAULT ''"],
+    ['loja_categorias', 'ativo',           'INTEGER DEFAULT 1'],
 ];
 foreach ($migrations as [$tbl, $col, $def]) {
     try {
@@ -672,37 +725,97 @@ if ($resource === 'modelos') {
 if ($resource === 'produtos') {
     auth_required();
     if ($method === 'GET' && $id === null) {
-        $q_raw_p = $_GET['q'] ?? '';
-        $q = '%' . normalizar_busca($q_raw_p) . '%';
-        $tipo_p = $_GET['tipo'] ?? '';
-        // Usar parâmetro preparado para tipo_item (evita SQL injection e quote duplo)
-        if ($tipo_p !== '') {
-            $s = $db->prepare("SELECT * FROM produtos WHERE (LOWER(descricao) LIKE ? OR LOWER(codigo_interno) LIKE ?) AND ativo=1 AND tipo_item=? ORDER BY descricao LIMIT 200");
-            $s->execute([$q, $q, $tipo_p]);
-        } else {
-            $s = $db->prepare("SELECT * FROM produtos WHERE (LOWER(descricao) LIKE ? OR LOWER(codigo_interno) LIKE ?) AND ativo=1 ORDER BY descricao LIMIT 200");
-            $s->execute([$q, $q]);
-        }
-        resp(200, $s->fetchAll());
+    $q_raw_p = $_GET['q'] ?? '';
+    $q       = '%' . normalizar_busca($q_raw_p) . '%';
+    $tipo_p  = $_GET['tipo'] ?? '';
+    $limit   = max(1, min(200, (int)($_GET['limit'] ?? 50)));
+    $page    = max(1, (int)($_GET['page'] ?? 1));
+    $offset  = ($page - 1) * $limit;
+
+    if ($tipo_p !== '') {
+        $where = "(LOWER(descricao) LIKE ? OR LOWER(codigo_interno) LIKE ?) AND ativo=1 AND tipo_item=?";
+        $params = [$q, $q, $tipo_p];
+    } else {
+        $where = "(LOWER(descricao) LIKE ? OR LOWER(codigo_interno) LIKE ?) AND ativo=1";
+        $params = [$q, $q];
+    }
+
+    $total = (int)$db->prepare("SELECT COUNT(*) FROM produtos WHERE $where")->execute($params) ? 
+             $db->prepare("SELECT COUNT(*) FROM produtos WHERE $where")->execute($params) : 0;
+    $stCount = $db->prepare("SELECT COUNT(*) FROM produtos WHERE $where");
+    $stCount->execute($params);
+    $total = (int)$stCount->fetchColumn();
+    $pages = (int)ceil(max(1, $total) / $limit);
+
+    $st = $db->prepare("SELECT * FROM produtos WHERE $where ORDER BY descricao LIMIT ? OFFSET ?");
+    $st->execute(array_merge($params, [$limit, $offset]));
+    resp(200, ['data' => $st->fetchAll(), 'total' => $total, 'page' => $page, 'pages' => $pages, 'limit' => $limit]);
     }
     if ($method === 'GET' && $id !== null) {
         $s = $db->prepare("SELECT * FROM produtos WHERE id=?"); $s->execute([$id]);
-        $r = $s->fetch(); resp($r ? 200 : 404, $r ?: ['error' => 'Não encontrado']);
+        $r = $s->fetch();
+        if ($r) {
+            // Incluir dados da aba Loja Virtual
+            $sl = $db->prepare("SELECT * FROM produto_loja WHERE produto_id=?");
+            $sl->execute([$id]);
+            $loja = $sl->fetch();
+            if ($loja) {
+                $r['loja_exibir']       = (int)($loja['loja_exibir'] ?? 0);
+                $r['loja_titulo']       = $loja['loja_titulo'] ?? '';
+                $r['loja_descricao']    = $loja['loja_descricao'] ?? '';
+                $r['loja_categoria_id'] = $loja['loja_categoria_id'] ?? null;
+                $r['loja_fotos']        = json_decode($loja['loja_fotos'] ?? '[]', true) ?: [];
+                $r['loja_variacoes']    = json_decode($loja['loja_variacoes'] ?? '[]', true) ?: [];
+            } else {
+                $r['loja_exibir']       = 0;
+                $r['loja_titulo']       = '';
+                $r['loja_descricao']    = '';
+                $r['loja_categoria_id'] = null;
+                $r['loja_fotos']        = [];
+                $r['loja_variacoes']    = [];
+            }
+        }
+        resp($r ? 200 : 404, $r ?: ['error' => 'Não encontrado']);
     }
     if ($method === 'POST') {
         if (empty($data['descricao'])) resp(400, ['error' => 'Descrição obrigatória']);
         $now = date('Y-m-d H:i:s');
         $db->prepare("INSERT INTO produtos (tipo_item,ativo,codigo_interno,codigo_barras,descricao,descricao_complementar,unidade_medida,unidade_compra,unidade_saida,fator_conversao,preco_custo,despesas_acessorias,outras_despesas,custo_final,preco_venda,margem_lucro,percentual_desconto_max,percentual_comissao,estoque_atual,estoque_minimo,estoque_maximo,estoque_imobilizado,estoque_uso_consumo,estoque_revenda,localizacao,peso_liquido,peso_bruto,largura,altura,profundidade,ncm,ncm_descricao,cfop,cest,origem,cst_icms,aliq_icms,cst_pis,aliq_pis,cst_cofins,aliq_cofins,cst_ipi,aliq_ipi,nfse_movimenta,nfse_codigo_servico,nfse_municipio,nfse_cnae,nfse_descricao_servico,nfse_deducoes,nfse_cofins,nfse_ir,nfse_outras_deducoes,nfse_pis,nfse_inss,nfse_csll,nfse_iss,nfse_id_municipal_evento,nfse_descricao_evento,nfse_data_ini_evento,nfse_data_fim_evento,nfse_logradouro,nfse_numero,tabela_servico_id,codigo_nbs,iss_percentual,nfse_natureza,nfse_incentivo_fiscal,observacoes,data_criacao,data_atualizacao) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)")
            ->execute([$data['tipo_item']??'produto',$data['ativo']??1,$data['codigo_interno']??'',(!empty($data['codigo_barras']) ? $data['codigo_barras'] : null),$data['descricao'],$data['descricao_complementar']??'',$data['unidade_medida']??'UN',$data['unidade_compra']??'',$data['unidade_saida']??'',(float)($data['fator_conversao']??1),(float)($data['preco_custo']??0),(float)($data['despesas_acessorias']??0),(float)($data['outras_despesas']??0),(float)($data['custo_final']??0),(float)($data['preco_venda']??0),(float)($data['margem_lucro']??0),(float)($data['percentual_desconto_max']??0),(float)($data['percentual_comissao']??0),(float)($data['estoque_atual']??0),(float)($data['estoque_minimo']??0),(float)($data['estoque_maximo']??0),(float)($data['estoque_imobilizado']??0),(float)($data['estoque_uso_consumo']??0),(float)($data['estoque_revenda']??0),$data['localizacao']??'',(float)($data['peso_liquido']??0),(float)($data['peso_bruto']??0),(float)($data['largura']??0),(float)($data['altura']??0),(float)($data['profundidade']??0),$data['ncm']??'',$data['ncm_descricao']??'',$data['cfop']??'',$data['cest']??'',$data['origem']??'0',$data['cst_icms']??'',(float)($data['aliq_icms']??0),$data['cst_pis']??'',(float)($data['aliq_pis']??0),$data['cst_cofins']??'',(float)($data['aliq_cofins']??0),$data['cst_ipi']??'',(float)($data['aliq_ipi']??0),(int)($data['nfse_movimenta']??0),$data['nfse_codigo_servico']??'',$data['nfse_municipio']??'',$data['nfse_cnae']??'',$data['nfse_descricao_servico']??'',(float)($data['nfse_deducoes']??0),(float)($data['nfse_cofins']??0),(float)($data['nfse_ir']??0),(float)($data['nfse_outras_deducoes']??0),(float)($data['nfse_pis']??0),(float)($data['nfse_inss']??0),(float)($data['nfse_csll']??0),(float)($data['nfse_iss']??0),$data['nfse_id_municipal_evento']??'',$data['nfse_descricao_evento']??'',$data['nfse_data_ini_evento']??'',$data['nfse_data_fim_evento']??'',$data['nfse_logradouro']??'',$data['nfse_numero']??'',$data['tabela_servico_id']??null,$data['codigo_nbs']??'',(float)($data['iss_percentual']??0),$data['nfse_natureza']??'tributacao_municipio',$data['nfse_incentivo_fiscal']??'nao',$data['observacoes']??'',$now,$now]);
-        resp(201, ['success' => true, 'id' => (int)$db->lastInsertId()]);
+        $newProdId = (int)$db->lastInsertId();
+        // Salvar dados da aba Loja Virtual em produto_loja
+        if (array_key_exists('loja_exibir', $data) || array_key_exists('loja_titulo', $data)) {
+            $loja_fotos_j     = json_encode(is_array($data['loja_fotos'] ?? null)     ? $data['loja_fotos']     : [], JSON_UNESCAPED_UNICODE);
+            $loja_vars_j      = json_encode(is_array($data['loja_variacoes'] ?? null) ? $data['loja_variacoes'] : [], JSON_UNESCAPED_UNICODE);
+            $loja_cat         = !empty($data['loja_categoria_id']) ? (int)$data['loja_categoria_id'] : null;
+            $db->prepare("INSERT OR REPLACE INTO produto_loja (produto_id, loja_exibir, loja_titulo, loja_descricao, loja_categoria_id, loja_fotos, loja_variacoes, data_atualizacao) VALUES (?,?,?,?,?,?,?,?)")
+               ->execute([$newProdId, (int)($data['loja_exibir']??0), trim($data['loja_titulo']??''), trim($data['loja_descricao']??''), $loja_cat, $loja_fotos_j, $loja_vars_j, date('Y-m-d H:i:s')]);
+        }
+        resp(201, ['success' => true, 'id' => $newProdId]);
     }
     if ($method === 'PUT' && $id !== null) {
         $db->prepare("UPDATE produtos SET tipo_item=?,ativo=?,codigo_interno=?,codigo_barras=?,descricao=?,descricao_complementar=?,unidade_medida=?,unidade_compra=?,unidade_saida=?,fator_conversao=?,preco_custo=?,despesas_acessorias=?,outras_despesas=?,custo_final=?,preco_venda=?,margem_lucro=?,percentual_desconto_max=?,percentual_comissao=?,estoque_atual=?,estoque_minimo=?,estoque_maximo=?,estoque_imobilizado=?,estoque_uso_consumo=?,estoque_revenda=?,localizacao=?,peso_liquido=?,peso_bruto=?,largura=?,altura=?,profundidade=?,ncm=?,ncm_descricao=?,cfop=?,cest=?,origem=?,cst_icms=?,aliq_icms=?,cst_pis=?,aliq_pis=?,cst_cofins=?,aliq_cofins=?,cst_ipi=?,aliq_ipi=?,nfse_movimenta=?,nfse_codigo_servico=?,nfse_municipio=?,nfse_cnae=?,nfse_descricao_servico=?,nfse_deducoes=?,nfse_cofins=?,nfse_ir=?,nfse_outras_deducoes=?,nfse_pis=?,nfse_inss=?,nfse_csll=?,nfse_iss=?,nfse_id_municipal_evento=?,nfse_descricao_evento=?,nfse_data_ini_evento=?,nfse_data_fim_evento=?,nfse_logradouro=?,nfse_numero=?,tabela_servico_id=?,codigo_nbs=?,iss_percentual=?,nfse_natureza=?,nfse_incentivo_fiscal=?,observacoes=?,data_atualizacao=? WHERE id=?")
            ->execute([$data['tipo_item']??'produto',$data['ativo']??1,$data['codigo_interno']??'',(!empty($data['codigo_barras']) ? $data['codigo_barras'] : null),$data['descricao'],$data['descricao_complementar']??'',$data['unidade_medida']??'UN',$data['unidade_compra']??'',$data['unidade_saida']??'',(float)($data['fator_conversao']??1),(float)($data['preco_custo']??0),(float)($data['despesas_acessorias']??0),(float)($data['outras_despesas']??0),(float)($data['custo_final']??0),(float)($data['preco_venda']??0),(float)($data['margem_lucro']??0),(float)($data['percentual_desconto_max']??0),(float)($data['percentual_comissao']??0),(float)($data['estoque_atual']??0),(float)($data['estoque_minimo']??0),(float)($data['estoque_maximo']??0),(float)($data['estoque_imobilizado']??0),(float)($data['estoque_uso_consumo']??0),(float)($data['estoque_revenda']??0),$data['localizacao']??'',(float)($data['peso_liquido']??0),(float)($data['peso_bruto']??0),(float)($data['largura']??0),(float)($data['altura']??0),(float)($data['profundidade']??0),$data['ncm']??'',$data['ncm_descricao']??'',$data['cfop']??'',$data['cest']??'',$data['origem']??'0',$data['cst_icms']??'',(float)($data['aliq_icms']??0),$data['cst_pis']??'',(float)($data['aliq_pis']??0),$data['cst_cofins']??'',(float)($data['aliq_cofins']??0),$data['cst_ipi']??'',(float)($data['aliq_ipi']??0),(int)($data['nfse_movimenta']??0),$data['nfse_codigo_servico']??'',$data['nfse_municipio']??'',$data['nfse_cnae']??'',$data['nfse_descricao_servico']??'',(float)($data['nfse_deducoes']??0),(float)($data['nfse_cofins']??0),(float)($data['nfse_ir']??0),(float)($data['nfse_outras_deducoes']??0),(float)($data['nfse_pis']??0),(float)($data['nfse_inss']??0),(float)($data['nfse_csll']??0),(float)($data['nfse_iss']??0),$data['nfse_id_municipal_evento']??'',$data['nfse_descricao_evento']??'',$data['nfse_data_ini_evento']??'',$data['nfse_data_fim_evento']??'',$data['nfse_logradouro']??'',$data['nfse_numero']??'',$data['tabela_servico_id']??null,$data['codigo_nbs']??'',(float)($data['iss_percentual']??0),$data['nfse_natureza']??'tributacao_municipio',$data['nfse_incentivo_fiscal']??'nao',$data['observacoes']??'',date('Y-m-d H:i:s'),$id]);
+        // Salvar / atualizar dados da aba Loja Virtual em produto_loja
+        if (array_key_exists('loja_exibir', $data) || array_key_exists('loja_titulo', $data)) {
+            $loja_fotos_j = json_encode(is_array($data['loja_fotos'] ?? null)     ? $data['loja_fotos']     : [], JSON_UNESCAPED_UNICODE);
+            $loja_vars_j  = json_encode(is_array($data['loja_variacoes'] ?? null) ? $data['loja_variacoes'] : [], JSON_UNESCAPED_UNICODE);
+            $loja_cat     = !empty($data['loja_categoria_id']) ? (int)$data['loja_categoria_id'] : null;
+            $chk = $db->prepare("SELECT id FROM produto_loja WHERE produto_id=?"); $chk->execute([$id]);
+            if ($chk->fetchColumn()) {
+                $db->prepare("UPDATE produto_loja SET loja_exibir=?, loja_titulo=?, loja_descricao=?, loja_categoria_id=?, loja_fotos=?, loja_variacoes=?, data_atualizacao=? WHERE produto_id=?")
+                   ->execute([(int)($data['loja_exibir']??0), trim($data['loja_titulo']??''), trim($data['loja_descricao']??''), $loja_cat, $loja_fotos_j, $loja_vars_j, date('Y-m-d H:i:s'), $id]);
+            } else {
+                $db->prepare("INSERT INTO produto_loja (produto_id, loja_exibir, loja_titulo, loja_descricao, loja_categoria_id, loja_fotos, loja_variacoes, data_atualizacao) VALUES (?,?,?,?,?,?,?,?)")
+                   ->execute([$id, (int)($data['loja_exibir']??0), trim($data['loja_titulo']??''), trim($data['loja_descricao']??''), $loja_cat, $loja_fotos_j, $loja_vars_j, date('Y-m-d H:i:s')]);
+            }
+        }
         resp(200, ['success' => true]);
     }
     if ($method === 'DELETE' && $id !== null) {
-        $db->prepare("DELETE FROM produtos WHERE id=?")->execute([$id]); resp(200, ['success' => true]);
+        $db->prepare("DELETE FROM produtos WHERE id=?")->execute([$id]);
+        $db->prepare("DELETE FROM produto_loja WHERE produto_id=?")->execute([$id]);
+        resp(200, ['success' => true]);
     }
     resp(405, ['error' => 'Método não permitido']);
 }
@@ -730,7 +843,7 @@ if ($resource === 'ordens_servico') {
         $s = $db->prepare("SELECT os.*, c.nome AS cliente_nome, c.telefone AS cliente_telefone, c.cpf AS cliente_cpf, ta.nome AS tipo_nome, m.nome AS marca_nome, mo.nome AS modelo_nome FROM ordens_servico os JOIN clientes c ON os.cliente_id=c.id LEFT JOIN tipos_aparelho ta ON os.tipo_aparelho_id=ta.id LEFT JOIN marcas m ON os.marca_id=m.id LEFT JOIN modelos mo ON os.modelo_id=mo.id WHERE os.id=?");
         $s->execute([$id]); $os = $s->fetch();
         if (!$os) resp(404, ['error' => 'Não encontrado']);
-        $s2 = $db->prepare("SELECT * FROM orcamentos WHERE ordem_id=? ORDER BY id"); $s2->execute([$id]); $os['orcamentos'] = $s2->fetchAll();
+        $s2 = $db->prepare("SELECT o.*, p.descricao AS produto_descricao, p.tipo_item AS produto_tipo FROM orcamentos o LEFT JOIN produtos p ON o.produto_id=p.id WHERE o.ordem_id=? ORDER BY o.id"); $s2->execute([$id]); $os['orcamentos'] = $s2->fetchAll();
         $s3 = $db->prepare("SELECT * FROM midias_os WHERE ordem_id=? ORDER BY id DESC"); $s3->execute([$id]); $os['midias'] = $s3->fetchAll();
         $s4 = $db->prepare("SELECT o.*, u.nome AS usuario_nome FROM ordem_observacoes o LEFT JOIN usuarios u ON o.usuario_id=u.id WHERE o.ordem_id=? ORDER BY o.id DESC"); $s4->execute([$id]); $os['observacoes'] = $s4->fetchAll();
         resp(200, $os);
@@ -748,10 +861,29 @@ if ($resource === 'ordens_servico') {
     if ($method === 'PUT' && $id !== null) {
         $db->beginTransaction();
         try {
-            $old = $db->prepare("SELECT status FROM ordens_servico WHERE id=?"); $old->execute([$id]); $old_s = $old->fetchColumn();
-            $new_s = $data['status'] ?? 'Aberta';
+            // Busca dados atuais da OS para fazer merge (evita sobrescrever campos não enviados)
+            $cur = $db->prepare("SELECT * FROM ordens_servico WHERE id=?");
+            $cur->execute([$id]);
+            $cur_os = $cur->fetch();
+            if (!$cur_os) { $db->rollBack(); resp(404, ['error' => 'OS não encontrada']); }
+
+            $old_s = $cur_os['status'];
+            $new_s = $data['status'] ?? $old_s;
+
             $db->prepare("UPDATE ordens_servico SET cliente_id=?,tipo_aparelho_id=?,marca_id=?,modelo_id=?,descricao=?,informacoes_adicionais=?,senha_aparelho=?,status=?,previsao_conclusao=?,data_atualizacao=? WHERE id=?")
-               ->execute([$data['cliente_id'],$data['tipo_aparelho_id']??null,$data['marca_id']??null,$data['modelo_id']??null,$data['descricao']??'',$data['informacoes_adicionais']??'',$data['senha_aparelho']??'',$new_s,$data['previsao_conclusao']??null,date('Y-m-d H:i:s'),$id]);
+               ->execute([
+                   $data['cliente_id']            ?? $cur_os['cliente_id'],
+                   $data['tipo_aparelho_id']       ?? $cur_os['tipo_aparelho_id'],
+                   $data['marca_id']               ?? $cur_os['marca_id'],
+                   $data['modelo_id']              ?? $cur_os['modelo_id'],
+                   $data['descricao']              ?? $cur_os['descricao'],
+                   $data['informacoes_adicionais'] ?? $cur_os['informacoes_adicionais'],
+                   $data['senha_aparelho']         ?? $cur_os['senha_aparelho'],
+                   $new_s,
+                   $data['previsao_conclusao']     ?? $cur_os['previsao_conclusao'],
+                   date('Y-m-d H:i:s'),
+                   $id
+               ]);
             if ($old_s && $old_s !== $new_s) $db->prepare("INSERT INTO notificacoes (ordem_id,novo_status) VALUES (?,?)")->execute([$id,$new_s]);
             $db->commit(); resp(200, ['success' => true]);
         } catch (Exception $e) { $db->rollBack(); resp(500, ['error' => $e->getMessage()]); }
@@ -772,13 +904,20 @@ if ($resource === 'ordens_servico') {
 if ($resource === 'orcamentos') {
     auth_required();
     if ($method === 'POST') {
-        $db->prepare("INSERT INTO orcamentos (ordem_id,observacoes,valor,status_orcamento) VALUES (?,?,?,?)")
-           ->execute([$data['ordem_id'],$data['observacoes']??'',$data['valor']??0,$data['status_orcamento']??'Pendente']);
+        $db->prepare("INSERT INTO orcamentos (ordem_id,produto_id,observacoes,valor,status_orcamento) VALUES (?,?,?,?,?)")
+           ->execute([$data['ordem_id'],$data['produto_id']??null,$data['observacoes']??'',$data['valor']??0,$data['status_orcamento']??'Pendente']);
         resp(201, ['success' => true, 'id' => (int)$db->lastInsertId()]);
     }
     if ($method === 'PUT' && $id !== null) {
-        $db->prepare("UPDATE orcamentos SET observacoes=?,valor=?,status_orcamento=? WHERE id=?")
-           ->execute([$data['observacoes']??'',$data['valor']??0,$data['status_orcamento']??'Pendente',$id]);
+        // Preserva produto_id se não enviado no payload
+        $produto_id_upd = array_key_exists('produto_id', $data) ? ($data['produto_id']??null) : null;
+        if(array_key_exists('produto_id', $data)){
+            $db->prepare("UPDATE orcamentos SET produto_id=?,observacoes=?,valor=?,status_orcamento=? WHERE id=?")
+               ->execute([$produto_id_upd,$data['observacoes']??'',$data['valor']??0,$data['status_orcamento']??'Pendente',$id]);
+        } else {
+            $db->prepare("UPDATE orcamentos SET observacoes=?,valor=?,status_orcamento=? WHERE id=?")
+               ->execute([$data['observacoes']??'',$data['valor']??0,$data['status_orcamento']??'Pendente',$id]);
+        }
         resp(200, ['success' => true]);
     }
     if ($method === 'DELETE' && $id !== null) {
@@ -1008,6 +1147,116 @@ if ($resource === 'dashboard') {
     resp(200, $s);
 }
 
+// ─── FATURAMENTO GRÁFICO (dashboard) ─────────────────────────
+if ($resource === 'faturamento_grafico' && $method === 'GET') {
+    auth_required();
+    $data_ini = $_GET['data_ini'] ?? date('Y-m-d', strtotime('-29 days'));
+    $data_fim = $_GET['data_fim'] ?? date('Y-m-d');
+
+    // ══════════════════════════════════════════════════════════════
+    // VENDAS (Produtos): lançamentos CR com status='Recebida'
+    //   1. Origem 'venda'  → proporcional ao valor dos itens tipo 'produto' na venda
+    //   2. Origem 'nfce'   → proporcional ao valor dos itens tipo 'produto' na venda vinculada à NFC-e
+    // ══════════════════════════════════════════════════════════════
+    $sql_vendas = "
+        SELECT DATE(cr.data_vencimento) AS dia,
+               SUM(
+                   cr.valor_recebido
+                   * COALESCE(
+                       (SELECT SUM(vi.subtotal)
+                        FROM venda_items vi
+                        JOIN produtos p ON p.id = vi.produto_id
+                        WHERE vi.venda_id = venda_ref.id
+                          AND p.tipo_item = 'produto')
+                       , 0)
+                   / NULLIF(
+                       (SELECT SUM(vi2.subtotal)
+                        FROM venda_items vi2
+                        WHERE vi2.venda_id = venda_ref.id)
+                       , 0)
+               ) AS total
+        FROM contas_receber cr
+        -- resolve o venda_id correto independente de ser 'venda' ou 'nfce'
+        LEFT JOIN vendas        vd  ON cr.venda_id = vd.id  AND cr.origem = 'venda'
+        LEFT JOIN nfce_emitidas nf  ON cr.venda_id = nf.id  AND cr.origem = 'nfce'
+        -- venda_ref é a venda real que contém os itens
+        LEFT JOIN vendas        venda_ref ON venda_ref.id = COALESCE(vd.id, nf.venda_id)
+        WHERE cr.status = 'Recebida'
+          AND cr.origem IN ('venda','nfce')
+          AND DATE(cr.data_vencimento) BETWEEN ? AND ?
+        GROUP BY dia ORDER BY dia
+    ";
+    $st_v = $db->prepare($sql_vendas);
+    $st_v->execute([$data_ini, $data_fim]);
+    $rows_v = $st_v->fetchAll();
+
+    // ══════════════════════════════════════════════════════════════
+    // SERVIÇOS: lançamentos CR com status='Recebida'
+    //   1. Origem 'nfse'   → valor total recebido (tudo é serviço)
+    //   2. Origem 'venda'  → proporcional ao valor dos itens tipo 'servico' na venda
+    //   3. Origem 'nfce'   → proporcional ao valor dos itens tipo 'servico' na venda vinculada
+    // ══════════════════════════════════════════════════════════════
+    $sql_servicos = "
+        SELECT DATE(cr.data_vencimento) AS dia,
+               SUM(
+                   CASE
+                     -- NFS-e: tudo é serviço
+                     WHEN cr.origem = 'nfse' THEN cr.valor_recebido
+                     -- Venda / NFC-e: proporção dos itens de serviço
+                     ELSE
+                       cr.valor_recebido
+                       * COALESCE(
+                           (SELECT SUM(vi.subtotal)
+                            FROM venda_items vi
+                            JOIN produtos p ON p.id = vi.produto_id
+                            WHERE vi.venda_id = venda_ref.id
+                              AND p.tipo_item = 'servico')
+                           , 0)
+                       / NULLIF(
+                           (SELECT SUM(vi2.subtotal)
+                            FROM venda_items vi2
+                            WHERE vi2.venda_id = venda_ref.id)
+                           , 0)
+                   END
+               ) AS total
+        FROM contas_receber cr
+        LEFT JOIN vendas        vd  ON cr.venda_id = vd.id  AND cr.origem = 'venda'
+        LEFT JOIN nfce_emitidas nf  ON cr.venda_id = nf.id  AND cr.origem = 'nfce'
+        LEFT JOIN vendas        venda_ref ON venda_ref.id = COALESCE(vd.id, nf.venda_id)
+        WHERE cr.status = 'Recebida'
+          AND cr.origem IN ('venda','nfce','nfse')
+          AND DATE(cr.data_vencimento) BETWEEN ? AND ?
+        GROUP BY dia ORDER BY dia
+    ";
+    $st_s = $db->prepare($sql_servicos);
+    $st_s->execute([$data_ini, $data_fim]);
+    $rows_s = $st_s->fetchAll();
+
+    // ── Gerar série de datas do intervalo ──
+    $dias = [];
+    $cur = new DateTime($data_ini);
+    $end = new DateTime($data_fim);
+    while ($cur <= $end) {
+        $dias[] = $cur->format('Y-m-d');
+        $cur->modify('+1 day');
+    }
+
+    $map_v = array_column($rows_v, 'total', 'dia');
+    $map_s = array_column($rows_s, 'total', 'dia');
+
+    $serie = array_map(fn($d) => [
+        'dia'     => $d,
+        'vendas'  => round((float)($map_v[$d] ?? 0), 2),
+        'os'      => round((float)($map_s[$d] ?? 0), 2),
+    ], $dias);
+
+    resp(200, [
+        'serie'    => $serie,
+        'data_ini' => $data_ini,
+        'data_fim' => $data_fim,
+    ]);
+}
+
 // ─── CONSULTA PÚBLICA ─────────────────────────────────────────
 if ($resource === 'consulta_publica' && $method === 'GET') {
     $oid = $_GET['id'] ?? null;
@@ -1066,7 +1315,24 @@ if ($resource === 'vendas') {
         $db->beginTransaction();
         try {
             $items = $data['items'] ?? [];
-            $subtotal_bruto = array_sum(array_map(fn($i)=>(+$i['quantidade'])*(+$i['valor_unitario']), $items));
+            // Valida produto_id obrigatório em todos os itens
+            foreach ($items as $idx => $item) {
+                if (empty($item['produto_id']) || (int)$item['produto_id'] <= 0) {
+                    $db->rollBack();
+                    $num = $idx + 1;
+                    resp(400, ['error' => "Item $num: selecione um produto ou serviço do cadastro. O campo produto é obrigatório."]);
+                }
+            }
+            $subtotal_bruto = array_sum(array_map(function($i) {
+                $base = (+$i['quantidade']) * (+$i['valor_unitario']);
+                $dt   = $i['desconto_tipo_item']  ?? 'valor';
+                $at   = $i['acrescimo_tipo_item'] ?? 'valor';
+                $dv   = (float)($i['desconto_valor']  ?? 0);
+                $av   = (float)($i['acrescimo_valor'] ?? 0);
+                $damt = $dt === 'percentual' ? round($base * $dv / 100, 2) : $dv;
+                $aamt = $at === 'percentual' ? round($base * $av / 100, 2) : $av;
+                return max(0, $base - $damt + $aamt);
+            }, $items));
             // Desconto
             $desc_tipo = $data['desconto_tipo'] ?? 'valor';
             $desc_val  = (float)($data['desconto_valor']??0);
@@ -1091,16 +1357,30 @@ if ($resource === 'vendas') {
             $cpf    = $data['cpf_cnpj'] ?? '';
             $d_cri  = $data['data_criacao'] ?? date('Y-m-d H:i:s');
             $d_conf = $data['data_confirmacao'] ?? null;
-            if (!$d_conf) $d_conf = date('Y-m-d H:i:s');
+            $venda_status = $data['status'] ?? 'Digitação';
+            if ($venda_status === 'Confirmada') {
+                if (!$d_conf) $d_conf = date('Y-m-d H:i:s');
+            } else {
+                $d_conf = null; // Não preenche data de confirmação se não for confirmada
+            }
             $db->prepare("INSERT INTO vendas (cliente_id,vendedor_id,os_id,cpf_cnpj,data_criacao,data_confirmacao,status,total,desconto_valor,desconto_percentual,desconto_tipo,acrescimo_valor,acrescimo_percentual,acrescimo_tipo,valor_frete,observacoes) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)")
-               ->execute([$data['cliente_id']??null,null,$os_id,$cpf,$d_cri,$d_conf,$data['status']??'Paga',$total,$desc_val,$desc_pct,$desc_tipo,$acres_val,$acres_pct,$acres_tipo,$frete,$data['observacoes']??'']);
+               ->execute([$data['cliente_id']??null,null,$os_id,$cpf,$d_cri,$d_conf,$venda_status,$total,$desc_val,$desc_pct,$desc_tipo,$acres_val,$acres_pct,$acres_tipo,$frete,$data['observacoes']??'']);
             $vid = (int)$db->lastInsertId();
             foreach ($items as $item) {
-                $qty = (float)($item['quantidade']??1);
-                $vu  = (float)($item['valor_unitario']??0);
-                $desc_item = trim($item['descricao_manual'] ?? $item['descricao'] ?? '');
-                $db->prepare("INSERT INTO venda_items (venda_id,produto_id,descricao,quantidade,valor_unitario,subtotal) VALUES (?,?,?,?,?,?)")
-                   ->execute([$vid,$item['produto_id']??null,$desc_item,$qty,$vu,round($qty*$vu,2)]);
+                $qty      = (float)($item['quantidade']??1);
+                $vu       = (float)($item['valor_unitario']??0);
+                $desc_item_val  = (float)($item['desconto_valor']??0);
+                $acres_item_val = (float)($item['acrescimo_valor']??0);
+                $desc_item_tipo  = $item['desconto_tipo_item'] ?? 'valor';
+                $acres_item_tipo = $item['acrescimo_tipo_item'] ?? 'valor';
+                $base     = $qty * $vu;
+                $desc_amt  = $desc_item_tipo  === 'percentual' ? round($base * $desc_item_val  / 100, 2) : $desc_item_val;
+                $acres_amt = $acres_item_tipo === 'percentual' ? round($base * $acres_item_val / 100, 2) : $acres_item_val;
+                $sub      = round(max(0, $base - $desc_amt + $acres_amt), 2);
+                $desc_item_str = trim($item['descricao_manual'] ?? $item['descricao'] ?? '');
+                $pid = isset($item['produto_id']) && (int)$item['produto_id'] > 0 ? (int)$item['produto_id'] : null;
+                $db->prepare("INSERT INTO venda_items (venda_id,produto_id,descricao,quantidade,valor_unitario,desconto_valor,acrescimo_valor,subtotal) VALUES (?,?,?,?,?,?,?,?)")
+                   ->execute([$vid,$pid,$desc_item_str,$qty,$vu,$desc_amt,$acres_amt,$sub]);
             }
             // Faturamentos e parcelas
             foreach (($data['faturamentos']??[]) as $fat) {
@@ -1130,33 +1410,261 @@ if ($resource === 'vendas') {
                    ->execute([date('Y-m-d H:i:s'),$os_id]);
             }
 
-            // ── Gerar contas a receber automaticamente ────────────────────
-            // Uma conta por parcela de cada faturamento
-            $sf2 = $db->prepare("SELECT f.*, p.id as parc_id, p.numero as parc_num, p.valor as parc_val, p.data_vencimento as parc_venc FROM venda_faturamentos f JOIN venda_parcelas p ON p.faturamento_id=f.id WHERE f.venda_id=?");
-            $sf2->execute([$vid]);
-            $parcelas_geradas = $sf2->fetchAll();
-            $now_cr = date('Y-m-d H:i:s');
-            $cli_id_cr = $data['cliente_id'] ?? null;
-            foreach ($parcelas_geradas as $parc) {
-                $nparcelas_fat = (int)$parc['num_parcelas'];
-                $desc_cr = $nparcelas_fat > 1
-                    ? "Venda #{$vid} — Parcela {$parc['parc_num']}/{$nparcelas_fat} ({$parc['forma_pagamento_nome']})"
-                    : "Venda #{$vid} — {$parc['forma_pagamento_nome']}";
-                $status_cr = ($data['status'] ?? 'Paga') === 'Paga' ? 'Recebida' : 'Aberta';
-                $val_rec   = $status_cr === 'Recebida' ? (float)$parc['parc_val'] : 0;
-                $dt_rec    = $status_cr === 'Recebida' ? date('Y-m-d') : null;
-                $db->prepare("INSERT INTO contas_receber (origem,venda_id,parcela_id,cliente_id,descricao,valor,valor_recebido,data_emissao,data_vencimento,data_recebimento,status,data_criacao,data_atualizacao) VALUES ('venda',?,?,?,?,?,?,?,?,?,?,?,?)")
-                   ->execute([$vid, $parc['parc_id'], $cli_id_cr, $desc_cr, (float)$parc['parc_val'], $val_rec, date('Y-m-d'), $parc['parc_venc'], $dt_rec, $status_cr, $now_cr, $now_cr]);
+            // ── Gerar contas a receber automaticamente (somente para vendas Confirmadas) ──
+            if ($venda_status === 'Confirmada') {
+                $sf2 = $db->prepare("
+                    SELECT f.*, p.id as parc_id, p.numero as parc_num, p.valor as parc_val, p.data_vencimento as parc_venc
+                    FROM venda_faturamentos f
+                    JOIN venda_parcelas p ON p.faturamento_id=f.id
+                    WHERE f.venda_id=?");
+                $sf2->execute([$vid]);
+                $parcelas_geradas = $sf2->fetchAll();
+                $now_cr    = date('Y-m-d H:i:s');
+                $cli_id_cr = $data['cliente_id'] ?? null;
+                foreach ($parcelas_geradas as $parc) {
+                    $nparcelas_fat = (int)$parc['num_parcelas'];
+                    $desc_cr   = $nparcelas_fat > 1
+                        ? "Venda #{$vid} — Parcela {$parc['parc_num']}/{$nparcelas_fat} ({$parc['forma_pagamento_nome']})"
+                        : "Venda #{$vid} — {$parc['forma_pagamento_nome']}";
+                    $doc_ref_cr = $os_id ? "OS #{$os_id}" : '';
+                    // Busca conta_bancaria_id vinculada à forma de pagamento
+                    $cb_id_cr = null;
+                    if (!empty($parc['forma_pagamento_id'])) {
+                        $fpRow = $db->prepare("SELECT conta_bancaria FROM formas_pagamento WHERE id=?");
+                        $fpRow->execute([$parc['forma_pagamento_id']]);
+                        $fpData = $fpRow->fetch();
+                        if ($fpData && !empty($fpData['conta_bancaria'])) {
+                            $cbRow = $db->prepare("SELECT id FROM contas_bancarias WHERE nome=? AND ativo=1 LIMIT 1");
+                            $cbRow->execute([$fpData['conta_bancaria']]);
+                            $cb_id_cr = $cbRow->fetchColumn() ?: null;
+                        }
+                    }
+                    // Lançamento sempre em Aberto — recebimento deve ser confirmado no financeiro
+                    $db->prepare("INSERT INTO contas_receber (origem,venda_id,parcela_id,cliente_id,conta_bancaria_id,descricao,valor,valor_recebido,data_emissao,data_vencimento,data_recebimento,status,documento_ref,data_criacao,data_atualizacao) VALUES ('venda',?,?,?,?,?,?,0,?,?,NULL,'Aberta',?,?,?)")
+                       ->execute([$vid, $parc['parc_id'], $cli_id_cr, $cb_id_cr, $desc_cr, (float)$parc['parc_val'], date('Y-m-d'), $parc['parc_venc'], $doc_ref_cr, $now_cr, $now_cr]);
+                }
             }
 
             $db->commit();
-            resp(201,['success'=>true,'id'=>$vid,'total'=>$total]);
+            resp(201,['success'=>true,'id'=>$vid,'total'=>$total,'status'=>$venda_status]);
         } catch(Exception $e){$db->rollBack();resp(500,['error'=>$e->getMessage()]);}
     }
     if ($method === 'PUT' && $id !== null) {
-        $db->prepare("UPDATE vendas SET status=?,observacoes=? WHERE id=?")
-           ->execute([$data['status']??'Paga',$data['observacoes']??'',$id]);
-        resp(200,['success'=>true]);
+        // Ação especial: confirmar venda em digitação
+        if (isset($data['action']) && $data['action'] === 'confirmar') {
+            $db->beginTransaction();
+            try {
+                $sv = $db->prepare("SELECT * FROM vendas WHERE id=?"); $sv->execute([$id]); $venda = $sv->fetch();
+                if (!$venda) { $db->rollBack(); resp(404,['error'=>'Venda não encontrada']); }
+                $d_conf_now = date('Y-m-d H:i:s');
+                $db->prepare("UPDATE vendas SET status='Confirmada', data_confirmacao=? WHERE id=?")->execute([$d_conf_now, $id]);
+                // Gera financeiro se ainda não existe
+                $sf_check = $db->prepare("SELECT COUNT(*) FROM contas_receber WHERE venda_id=?"); $sf_check->execute([$id]);
+                if ((int)$sf_check->fetchColumn() === 0) {
+                    $sf2 = $db->prepare("
+                        SELECT f.*, p.id as parc_id, p.numero as parc_num, p.valor as parc_val, p.data_vencimento as parc_venc
+                        FROM venda_faturamentos f
+                        JOIN venda_parcelas p ON p.faturamento_id=f.id
+                        WHERE f.venda_id=?");
+                    $sf2->execute([$id]);
+                    $parcelas_geradas = $sf2->fetchAll();
+                    $now_cr = date('Y-m-d H:i:s');
+                    $cli_id_cr = $venda['cliente_id'];
+                    $total_v = (float)$venda['total'];
+                    $os_id_v = $venda['os_id'];
+                    foreach ($parcelas_geradas as $parc) {
+                        $nparcelas_fat = (int)$parc['num_parcelas'];
+                        $desc_cr = $nparcelas_fat > 1
+                            ? "Venda #{$id} — Parcela {$parc['parc_num']}/{$nparcelas_fat} ({$parc['forma_pagamento_nome']})"
+                            : "Venda #{$id} — {$parc['forma_pagamento_nome']}";
+                        $doc_ref_cr = $os_id_v ? "OS #{$os_id_v}" : '';
+                        // Busca conta_bancaria_id vinculada à forma de pagamento
+                        $cb_id_cr = null;
+                        if (!empty($parc['forma_pagamento_id'])) {
+                            $fpRow = $db->prepare("SELECT conta_bancaria FROM formas_pagamento WHERE id=?");
+                            $fpRow->execute([$parc['forma_pagamento_id']]);
+                            $fpData = $fpRow->fetch();
+                            if ($fpData && !empty($fpData['conta_bancaria'])) {
+                                $cbRow = $db->prepare("SELECT id FROM contas_bancarias WHERE nome=? AND ativo=1 LIMIT 1");
+                                $cbRow->execute([$fpData['conta_bancaria']]);
+                                $cb_id_cr = $cbRow->fetchColumn() ?: null;
+                            }
+                        }
+                        // Lançamento sempre em Aberto — recebimento deve ser confirmado no financeiro
+                        $db->prepare("INSERT INTO contas_receber (origem,venda_id,parcela_id,cliente_id,conta_bancaria_id,descricao,valor,valor_recebido,data_emissao,data_vencimento,data_recebimento,status,documento_ref,data_criacao,data_atualizacao) VALUES ('venda',?,?,?,?,?,?,0,?,?,NULL,'Aberta',?,?,?)")
+                           ->execute([$id, $parc['parc_id'], $cli_id_cr, $cb_id_cr, $desc_cr, (float)$parc['parc_val'], date('Y-m-d'), $parc['parc_venc'], $doc_ref_cr, $now_cr, $now_cr]);
+                    }
+                }
+                $db->commit();
+                resp(200,['success'=>true,'message'=>'Venda confirmada e financeiro gerado.']);
+            } catch(Exception $e){ $db->rollBack(); resp(500,['error'=>$e->getMessage()]); }
+        }
+        // Ação especial: cancelar venda (apaga financeiro e estoque, mantém registro)
+        if (isset($data['action']) && $data['action'] === 'cancelar') {
+            $db->beginTransaction();
+            try {
+                $sv = $db->prepare("SELECT * FROM vendas WHERE id=?"); $sv->execute([$id]); $venda = $sv->fetch();
+                if (!$venda) { $db->rollBack(); resp(404,['error'=>'Venda não encontrada']); }
+                // Remove contas a receber vinculadas
+                $db->prepare("DELETE FROM contas_receber WHERE venda_id=? AND origem='venda'")->execute([$id]);
+                // Remove movimentações de estoque vinculadas (se existir tabela)
+                $tables = array_column($db->query("SELECT name FROM sqlite_master WHERE type='table'")->fetchAll(), 'name');
+                if (in_array('estoque_movimentacoes', $tables)) {
+                    $db->prepare("DELETE FROM estoque_movimentacoes WHERE venda_id=?")->execute([$id]);
+                }
+                // Atualiza status para Cancelada
+                $db->prepare("UPDATE vendas SET status='Cancelada' WHERE id=?")->execute([$id]);
+                $db->commit();
+                resp(200,['success'=>true,'message'=>'Venda cancelada. Lançamentos financeiros removidos.']);
+            } catch(Exception $e){ $db->rollBack(); resp(500,['error'=>$e->getMessage()]); }
+        }
+        if (isset($data['action']) && $data['action'] === 'estornar') {
+            $db->beginTransaction();
+            try {
+                $sv = $db->prepare("SELECT * FROM vendas WHERE id=?"); $sv->execute([$id]); $venda = $sv->fetch();
+                if (!$venda) { $db->rollBack(); resp(404,['error'=>'Venda não encontrada']); }
+                if ($venda['status'] !== 'Confirmada') { $db->rollBack(); resp(400,['error'=>'Apenas vendas Confirmadas podem ser estornadas.']); }
+                // Remove lançamentos financeiros (contas a receber) vinculados
+                $db->prepare("DELETE FROM contas_receber WHERE venda_id=? AND origem='venda'")->execute([$id]);
+                // Volta status para Digitação e limpa data de confirmação
+                $db->prepare("UPDATE vendas SET status='Digitação', data_confirmacao=NULL WHERE id=?")->execute([$id]);
+                $db->commit();
+                resp(200,['success'=>true,'message'=>'Confirmação estornada. Venda voltou para Digitação e lançamentos financeiros foram removidos.']);
+            } catch(Exception $e){ $db->rollBack(); resp(500,['error'=>$e->getMessage()]); }
+        }
+        // PUT simples ou edição completa da venda
+        $db->beginTransaction();
+        try {
+            $sv = $db->prepare("SELECT * FROM vendas WHERE id=?"); $sv->execute([$id]); $vendaAtual = $sv->fetch();
+            if (!$vendaAtual) { $db->rollBack(); resp(404,['error'=>'Venda não encontrada']); }
+
+            $novo_status = $data['status'] ?? $vendaAtual['status'];
+
+            // Se enviou itens, recalcula o total e substitui
+            if (isset($data['items'])) {
+                $items = $data['items'] ?? [];
+                // Valida produto_id obrigatório em todos os itens
+                foreach ($items as $idx => $item) {
+                    if (empty($item['produto_id']) || (int)$item['produto_id'] <= 0) {
+                        $db->rollBack();
+                        $num = $idx + 1;
+                        resp(400, ['error' => "Item $num: selecione um produto ou serviço do cadastro. O campo produto é obrigatório."]);
+                    }
+                }
+                $subtotal_bruto = array_sum(array_map(function($i) {
+                    $base = (+$i['quantidade']) * (+$i['valor_unitario']);
+                    $dt   = $i['desconto_tipo_item']  ?? 'valor';
+                    $at   = $i['acrescimo_tipo_item'] ?? 'valor';
+                    $dv   = (float)($i['desconto_valor']  ?? 0);
+                    $av   = (float)($i['acrescimo_valor'] ?? 0);
+                    $damt = $dt === 'percentual' ? round($base * $dv / 100, 2) : $dv;
+                    $aamt = $at === 'percentual' ? round($base * $av / 100, 2) : $av;
+                    return max(0, $base - $damt + $aamt);
+                }, $items));
+                $desc_tipo = $data['desconto_tipo'] ?? 'valor';
+                $desc_val  = (float)($data['desconto_valor'] ?? 0);
+                if ($desc_tipo === 'percentual') $desc_val = round($subtotal_bruto * $desc_val / 100, 2);
+                $acres_tipo = $data['acrescimo_tipo'] ?? 'valor';
+                $acres_val  = (float)($data['acrescimo_valor'] ?? 0);
+                if ($acres_tipo === 'percentual') $acres_val = round($subtotal_bruto * $acres_val / 100, 2);
+                $frete = (float)($data['valor_frete'] ?? 0);
+                $total = round($subtotal_bruto - $desc_val + $acres_val + $frete, 2);
+                $desc_pct  = $subtotal_bruto > 0 ? round($desc_val / $subtotal_bruto * 100, 4) : 0;
+                $acres_pct = $subtotal_bruto > 0 ? round($acres_val / $subtotal_bruto * 100, 4) : 0;
+                $d_conf = $data['data_confirmacao'] ?? null;
+                if ($novo_status === 'Confirmada' && !$d_conf) $d_conf = date('Y-m-d H:i:s');
+                if ($novo_status !== 'Confirmada') $d_conf = $vendaAtual['data_confirmacao'];
+                $db->prepare("UPDATE vendas SET cliente_id=?,cpf_cnpj=?,data_criacao=?,data_confirmacao=?,status=?,total=?,desconto_valor=?,desconto_percentual=?,desconto_tipo=?,acrescimo_valor=?,acrescimo_percentual=?,acrescimo_tipo=?,valor_frete=?,observacoes=? WHERE id=?")
+                   ->execute([
+                       $data['cliente_id'] ?? $vendaAtual['cliente_id'],
+                       $data['cpf_cnpj'] ?? $vendaAtual['cpf_cnpj'],
+                       $data['data_criacao'] ?? $vendaAtual['data_criacao'],
+                       $d_conf,
+                       $novo_status,
+                       $total,
+                       $desc_val, $desc_pct, $desc_tipo,
+                       $acres_val, $acres_pct, $acres_tipo,
+                       $frete,
+                       $data['observacoes'] ?? $vendaAtual['observacoes'],
+                       $id
+                   ]);
+                // Substitui itens
+                $db->prepare("DELETE FROM venda_items WHERE venda_id=?")->execute([$id]);
+                foreach ($items as $item) {
+                    $qty      = (float)($item['quantidade'] ?? 1);
+                    $vu       = (float)($item['valor_unitario'] ?? 0);
+                    $desc_item_val  = (float)($item['desconto_valor']  ?? 0);
+                    $acres_item_val = (float)($item['acrescimo_valor'] ?? 0);
+                    $dt_item  = $item['desconto_tipo_item']  ?? 'valor';
+                    $at_item  = $item['acrescimo_tipo_item'] ?? 'valor';
+                    $base_it  = $qty * $vu;
+                    $damt_it  = $dt_item === 'percentual' ? round($base_it * $desc_item_val  / 100, 2) : $desc_item_val;
+                    $aamt_it  = $at_item === 'percentual' ? round($base_it * $acres_item_val / 100, 2) : $acres_item_val;
+                    $sub_it   = round(max(0, $base_it - $damt_it + $aamt_it), 2);
+                    $desc_it_str = trim($item['descricao_manual'] ?? $item['descricao'] ?? '');
+                    $pid = isset($item['produto_id']) && (int)$item['produto_id'] > 0 ? (int)$item['produto_id'] : null;
+                    $db->prepare("INSERT INTO venda_items (venda_id,produto_id,descricao,quantidade,valor_unitario,desconto_valor,acrescimo_valor,subtotal) VALUES (?,?,?,?,?,?,?,?)")
+                       ->execute([$id, $pid, $desc_it_str, $qty, $vu, $damt_it, $aamt_it, $sub_it]);
+                }
+                // Se confirmada e não tinha financeiro, gera agora
+                if ($novo_status === 'Confirmada' && $vendaAtual['status'] !== 'Confirmada') {
+                    $db->prepare("DELETE FROM contas_receber WHERE venda_id=? AND origem='venda'")->execute([$id]);
+                    // Substitui faturamentos se enviados
+                    if (isset($data['faturamentos'])) {
+                        $db->prepare("DELETE FROM venda_faturamentos WHERE venda_id=?")->execute([$id]);
+                        $db->prepare("DELETE FROM venda_parcelas WHERE venda_id=?")->execute([$id]);
+                        foreach (($data['faturamentos'] ?? []) as $fat) {
+                            $fp_id   = $fat['forma_pagamento_id'] ?? null;
+                            $fp_nome = $fat['forma_pagamento_nome'] ?? '';
+                            $v_total = (float)($fat['valor_total'] ?? $total);
+                            $v_pago  = (float)($fat['valor_pago'] ?? 0);
+                            $nparcelas = (int)($fat['num_parcelas'] ?? 1);
+                            $d1prc   = $fat['data_primeira_parcela'] ?? date('Y-m-d');
+                            $intdias = (int)($fat['intervalo_dias'] ?? 30);
+                            $juros   = (float)($fat['juros_am'] ?? 0);
+                            $taxa    = (float)($fat['taxa_fixa'] ?? 0);
+                            $trep    = $fat['tipo_repeticao'] ?? 'mensal';
+                            $db->prepare("INSERT INTO venda_faturamentos (venda_id,forma_pagamento_id,forma_pagamento_nome,valor_total,valor_pago,num_parcelas,data_primeira_parcela,intervalo_dias,juros_am,taxa_fixa,tipo_repeticao) VALUES (?,?,?,?,?,?,?,?,?,?,?)")
+                               ->execute([$id,$fp_id,$fp_nome,$v_total,$v_pago,$nparcelas,$d1prc,$intdias,$juros,$taxa,$trep]);
+                            $fat_id = (int)$db->lastInsertId();
+                            foreach (($fat['parcelas'] ?? []) as $pi => $p) {
+                                $db->prepare("INSERT INTO venda_parcelas (faturamento_id,venda_id,numero,valor,valor_juros,valor_taxa,data_vencimento,status) VALUES (?,?,?,?,?,?,?,?)")
+                                   ->execute([$fat_id,$id,$pi+1,(float)($p['valor']??0),(float)($p['valor_juros']??0),(float)($p['valor_taxa']??0),$p['data_vencimento']??null,'Aberta']);
+                            }
+                        }
+                    }
+                    // Gera contas a receber
+                    $sf2 = $db->prepare("SELECT f.*, p.id as parc_id, p.numero as parc_num, p.valor as parc_val, p.data_vencimento as parc_venc FROM venda_faturamentos f JOIN venda_parcelas p ON p.faturamento_id=f.id WHERE f.venda_id=?");
+                    $sf2->execute([$id]); $parcelas_geradas = $sf2->fetchAll();
+                    $now_cr = date('Y-m-d H:i:s'); $cli_id_cr = $data['cliente_id'] ?? $vendaAtual['cliente_id'];
+                    foreach ($parcelas_geradas as $parc) {
+                        $npf = (int)$parc['num_parcelas'];
+                        $desc_cr = $npf > 1 ? "Venda #{$id} — Parcela {$parc['parc_num']}/{$npf} ({$parc['forma_pagamento_nome']})" : "Venda #{$id} — {$parc['forma_pagamento_nome']}";
+                        // Busca conta_bancaria_id vinculada à forma de pagamento
+                        $cb_id_cr = null;
+                        if (!empty($parc['forma_pagamento_id'])) {
+                            $fpRow = $db->prepare("SELECT conta_bancaria FROM formas_pagamento WHERE id=?");
+                            $fpRow->execute([$parc['forma_pagamento_id']]);
+                            $fpData = $fpRow->fetch();
+                            if ($fpData && !empty($fpData['conta_bancaria'])) {
+                                $cbRow = $db->prepare("SELECT id FROM contas_bancarias WHERE nome=? AND ativo=1 LIMIT 1");
+                                $cbRow->execute([$fpData['conta_bancaria']]);
+                                $cb_id_cr = $cbRow->fetchColumn() ?: null;
+                            }
+                        }
+                        // Lançamento sempre em Aberto — recebimento deve ser confirmado no financeiro
+                        $db->prepare("INSERT INTO contas_receber (origem,venda_id,parcela_id,cliente_id,conta_bancaria_id,descricao,valor,valor_recebido,data_emissao,data_vencimento,data_recebimento,status,data_criacao,data_atualizacao) VALUES ('venda',?,?,?,?,?,?,0,?,?,NULL,'Aberta',?,?)")
+                           ->execute([$id,$parc['parc_id'],$cli_id_cr,$cb_id_cr,$desc_cr,(float)$parc['parc_val'],date('Y-m-d'),$parc['parc_venc'],$now_cr,$now_cr]);
+                    }
+                }
+            } else {
+                // PUT simples — só status/observações
+                $db->prepare("UPDATE vendas SET status=?,observacoes=? WHERE id=?")
+                   ->execute([$novo_status, $data['observacoes'] ?? $vendaAtual['observacoes'], $id]);
+            }
+            $db->commit();
+            resp(200,['success'=>true,'status'=>$novo_status]);
+        } catch(Exception $e){ $db->rollBack(); resp(500,['error'=>$e->getMessage()]); }
     }
     if ($method === 'DELETE' && $id !== null) {
         $db->prepare("DELETE FROM venda_items WHERE venda_id=?")->execute([$id]);
@@ -1431,6 +1939,126 @@ if ($resource === 'tabelas_preco') {
     resp(405,['error'=>'Método não permitido']);
 }
 
+// ─── LOJA VIRTUAL: CATEGORIAS ────────────────────────────────
+if ($resource === 'loja_categorias') {
+    auth_required();
+    if ($method === 'GET' && $id === null) {
+        $q = '%' . ($data['q'] ?? $_GET['q'] ?? '') . '%';
+        $limit = max(1, min(500, (int)($_GET['limit'] ?? 200)));
+        $s = $db->prepare("SELECT * FROM loja_categorias WHERE nome LIKE ? AND ativo=1 ORDER BY nome LIMIT ?");
+        $s->execute([$q, $limit]);
+        resp(200, $s->fetchAll());
+    }
+    if ($method === 'GET' && $id !== null) {
+        $s = $db->prepare("SELECT * FROM loja_categorias WHERE id=?");
+        $s->execute([$id]);
+        $r = $s->fetch();
+        resp($r ? 200 : 404, $r ?: ['error' => 'Não encontrado']);
+    }
+    if ($method === 'POST') {
+        $nome = trim($data['nome'] ?? '');
+        if (!$nome) resp(400, ['error' => 'Nome obrigatório']);
+        $db->prepare("INSERT INTO loja_categorias (nome, descricao, ativo, data_criacao) VALUES (?,?,1,?)")
+           ->execute([$nome, $data['descricao'] ?? '', date('Y-m-d H:i:s')]);
+        resp(201, ['success' => true, 'id' => (int)$db->lastInsertId()]);
+    }
+    if ($method === 'PUT' && $id !== null) {
+        $nome = trim($data['nome'] ?? '');
+        if (!$nome) resp(400, ['error' => 'Nome obrigatório']);
+        $db->prepare("UPDATE loja_categorias SET nome=?, descricao=? WHERE id=?")
+           ->execute([$nome, $data['descricao'] ?? '', $id]);
+        resp(200, ['success' => true]);
+    }
+    if ($method === 'DELETE' && $id !== null) {
+        // Inativa em vez de deletar para não quebrar vínculos com produtos
+        $db->prepare("UPDATE loja_categorias SET ativo=0 WHERE id=?")->execute([$id]);
+        resp(200, ['success' => true]);
+    }
+    resp(405, ['error' => 'Método não permitido']);
+}
+
+// ─── LOJA VIRTUAL: DADOS DO PRODUTO (aba Loja Virtual) ───────
+// Os campos de loja ficam em tabela separada (produto_loja) para
+// não poluir a tabela produtos, que já é muito larga.
+// O frontend envia/lê via resource='produto_loja'&produto_id=X
+if ($resource === 'produto_loja') {
+    auth_required();
+    $pid = (int)($_GET['produto_id'] ?? $data['produto_id'] ?? 0);
+
+    // Helper: lê registro da loja para um produto, retornando array com defaults
+    $getLoja = function(int $pid) use ($db): array {
+        $s = $db->prepare("SELECT * FROM produto_loja WHERE produto_id=?");
+        $s->execute([$pid]);
+        $r = $s->fetch();
+        if (!$r) {
+            return [
+                'produto_id'        => $pid,
+                'loja_exibir'       => 0,
+                'loja_titulo'       => '',
+                'loja_descricao'    => '',
+                'loja_categoria_id' => null,
+                'loja_fotos'        => [],
+                'loja_variacoes'    => [],
+            ];
+        }
+        // Desserializa JSON dos arrays
+        $r['loja_fotos']     = json_decode($r['loja_fotos'] ?? '[]', true) ?: [];
+        $r['loja_variacoes'] = json_decode($r['loja_variacoes'] ?? '[]', true) ?: [];
+        return $r;
+    };
+
+    if ($method === 'GET') {
+        if (!$pid) resp(400, ['error' => 'produto_id obrigatório']);
+        resp(200, $getLoja($pid));
+    }
+
+    // POST ou PUT: salva os dados da loja para o produto (upsert)
+    if ($method === 'POST' || $method === 'PUT') {
+        if (!$pid) resp(400, ['error' => 'produto_id obrigatório']);
+
+        // Serializa arrays para JSON
+        $fotos_raw     = $data['loja_fotos']     ?? [];
+        $variacoes_raw = $data['loja_variacoes'] ?? [];
+        $fotos_json     = is_array($fotos_raw)     ? json_encode($fotos_raw,     JSON_UNESCAPED_UNICODE) : (string)$fotos_raw;
+        $variacoes_json = is_array($variacoes_raw) ? json_encode($variacoes_raw, JSON_UNESCAPED_UNICODE) : (string)$variacoes_raw;
+
+        $loja_exibir      = (int)($data['loja_exibir']       ?? 0);
+        $loja_titulo      = trim($data['loja_titulo']        ?? '');
+        $loja_descricao   = trim($data['loja_descricao']     ?? '');
+        $loja_cat_id      = !empty($data['loja_categoria_id']) ? (int)$data['loja_categoria_id'] : null;
+        $now              = date('Y-m-d H:i:s');
+
+        // Testa se já existe registro para este produto
+        $check = $db->prepare("SELECT id FROM produto_loja WHERE produto_id=?");
+        $check->execute([$pid]);
+        $existe = $check->fetchColumn();
+
+        if ($existe) {
+            $db->prepare("UPDATE produto_loja
+                SET loja_exibir=?, loja_titulo=?, loja_descricao=?,
+                    loja_categoria_id=?, loja_fotos=?, loja_variacoes=?, data_atualizacao=?
+                WHERE produto_id=?")
+               ->execute([$loja_exibir, $loja_titulo, $loja_descricao,
+                           $loja_cat_id, $fotos_json, $variacoes_json, $now, $pid]);
+        } else {
+            $db->prepare("INSERT INTO produto_loja
+                (produto_id, loja_exibir, loja_titulo, loja_descricao,
+                 loja_categoria_id, loja_fotos, loja_variacoes, data_atualizacao)
+                VALUES (?,?,?,?,?,?,?,?)")
+               ->execute([$pid, $loja_exibir, $loja_titulo, $loja_descricao,
+                           $loja_cat_id, $fotos_json, $variacoes_json, $now]);
+        }
+        resp(200, ['success' => true]);
+    }
+
+    if ($method === 'DELETE' && $pid) {
+        $db->prepare("DELETE FROM produto_loja WHERE produto_id=?")->execute([$pid]);
+        resp(200, ['success' => true]);
+    }
+
+    resp(405, ['error' => 'Método não permitido']);
+}
+
 // ─── TABELAS DE SERVIÇO ───────────────────────────────────────
 // ─── NOTAS FISCAIS DE ENTRADA ────────────────────────────────
 if ($resource === 'nfe') {
@@ -1700,14 +2328,21 @@ if ($resource === 'contas_receber') {
         if ($data_ini) { $where[] = 'cr.data_vencimento >= ?'; $params[] = $data_ini; }
         if ($data_fim) { $where[] = 'cr.data_vencimento <= ?'; $params[] = $data_fim; }
         if ($vencidas === '1') { $where[] = "cr.data_vencimento < DATE('now') AND cr.status='Aberta'"; }
+        $cb_filter = $_GET['conta_bancaria_id'] ?? '';
+        if ($cb_filter !== '') { $where[] = 'cr.conta_bancaria_id=?'; $params[] = (int)$cb_filter; }
         $w = implode(' AND ', $where);
+
+        // Ordenação dinâmica com whitelist de colunas seguras
+        $allowed_cols = ['id','data_vencimento','data_emissao','valor','valor_recebido','status','descricao'];
+        $order_by  = in_array($_GET['order_by']??'', $allowed_cols) ? 'cr.'.($_GET['order_by']) : 'cr.id';
+        $order_dir = strtoupper($_GET['order_dir']??'DESC') === 'ASC' ? 'ASC' : 'DESC';
 
         $tc = $db->prepare("SELECT COUNT(*) FROM contas_receber cr LEFT JOIN clientes c ON cr.cliente_id=c.id WHERE $w");
         $tc->execute($params); $total = (int)$tc->fetchColumn();
 
         $s = $db->prepare("
             SELECT cr.*,
-                   c.nome  AS cliente_nome,
+                   COALESCE(c.nome, cr.cliente_nome_manual) AS cliente_nome,
                    cf.nome AS categoria_nome, cf.cor AS categoria_cor,
                    cb.nome AS conta_bancaria_nome
             FROM contas_receber cr
@@ -1715,7 +2350,7 @@ if ($resource === 'contas_receber') {
             LEFT JOIN categorias_financeiras cf ON cr.categoria_id=cf.id
             LEFT JOIN contas_bancarias cb  ON cr.conta_bancaria_id=cb.id
             WHERE $w
-            ORDER BY cr.data_vencimento ASC, cr.id DESC
+            ORDER BY $order_by $order_dir
             LIMIT ? OFFSET ?
         ");
         $s->execute(array_merge($params, [$limit, $offset]));
@@ -1734,7 +2369,7 @@ if ($resource === 'contas_receber') {
 
     // ── GET individual ────────────────────────────────────────────────────
     if ($method === 'GET' && $id !== null) {
-        $s = $db->prepare("SELECT cr.*, c.nome AS cliente_nome, cf.nome AS categoria_nome FROM contas_receber cr LEFT JOIN clientes c ON cr.cliente_id=c.id LEFT JOIN categorias_financeiras cf ON cr.categoria_id=cf.id WHERE cr.id=?");
+        $s = $db->prepare("SELECT cr.*, COALESCE(c.nome, cr.cliente_nome_manual) AS cliente_nome, cf.nome AS categoria_nome FROM contas_receber cr LEFT JOIN clientes c ON cr.cliente_id=c.id LEFT JOIN categorias_financeiras cf ON cr.categoria_id=cf.id WHERE cr.id=?");
         $s->execute([$id]); $r = $s->fetch();
         resp($r ? 200 : 404, $r ?: ['error' => 'Não encontrado']);
     }
@@ -1837,7 +2472,14 @@ if ($resource === 'contas_pagar') {
         if ($data_ini) { $where[] = 'cp.data_vencimento >= ?'; $params[] = $data_ini; }
         if ($data_fim) { $where[] = 'cp.data_vencimento <= ?'; $params[] = $data_fim; }
         if ($vencidas === '1') { $where[] = "cp.data_vencimento < DATE('now') AND cp.status='Aberta'"; }
+        $cb_filter_p = $_GET['conta_bancaria_id'] ?? '';
+        if ($cb_filter_p !== '') { $where[] = 'cp.conta_bancaria_id=?'; $params[] = (int)$cb_filter_p; }
         $w = implode(' AND ', $where);
+
+        // Ordenação dinâmica com whitelist de colunas seguras
+        $allowed_cols_p = ['id','data_vencimento','data_emissao','valor','valor_pago','status','descricao'];
+        $order_by  = in_array($_GET['order_by']??'', $allowed_cols_p) ? 'cp.'.($_GET['order_by']) : 'cp.id';
+        $order_dir = strtoupper($_GET['order_dir']??'DESC') === 'ASC' ? 'ASC' : 'DESC';
 
         $tc = $db->prepare("SELECT COUNT(*) FROM contas_pagar cp LEFT JOIN fornecedores f ON cp.fornecedor_id=f.id WHERE $w");
         $tc->execute($params); $total = (int)$tc->fetchColumn();
@@ -1852,7 +2494,7 @@ if ($resource === 'contas_pagar') {
             LEFT JOIN categorias_financeiras cf    ON cp.categoria_id=cf.id
             LEFT JOIN contas_bancarias cb          ON cp.conta_bancaria_id=cb.id
             WHERE $w
-            ORDER BY cp.data_vencimento ASC, cp.id DESC
+            ORDER BY $order_by $order_dir
             LIMIT ? OFFSET ?
         ");
         $s->execute(array_merge($params, [$limit, $offset]));
@@ -2205,6 +2847,102 @@ if ($resource === 'nfce_status' && $method === 'GET') {
     ]);
 }
 
+// ─── VERIFICAÇÃO DE ATUALIZAÇÕES NFEPHP ───────────────────────────────────────
+if ($resource === 'nfce_updates' && $method === 'GET') {
+    auth_required();
+
+    $pacotes_monitorados = [
+        'nfephp-org/sped-nfe',
+        'nfephp-org/sped-da',
+        'nfephp-org/sped-common',
+    ];
+
+    // ── Lê as versões instaladas do composer.lock ────────────────────
+    $lock_path = __DIR__ . '/nfephp/composer.lock';
+    $instalados = [];
+    if (file_exists($lock_path)) {
+        $lock = json_decode(file_get_contents($lock_path), true);
+        foreach (($lock['packages'] ?? []) as $pkg) {
+            $nome = $pkg['name'] ?? '';
+            if (in_array($nome, $pacotes_monitorados)) {
+                // Remove o "v" prefixo se existir (ex: "v5.1.2" → "5.1.2")
+                $instalados[$nome] = ltrim($pkg['version'] ?? '', 'v');
+            }
+        }
+    }
+
+    // ── Consulta Packagist para cada pacote ──────────────────────────
+    $resultado = [];
+    foreach ($pacotes_monitorados as $nome) {
+        $entrada = [
+            'nome'       => $nome,
+            'instalado'  => $instalados[$nome] ?? null,
+            'disponivel' => null,
+            'desatualizado' => false,
+            'erro'       => null,
+        ];
+
+        // GET https://packagist.org/packages/{vendor}/{package}.json
+        $url = 'https://packagist.org/packages/' . $nome . '.json';
+        $ctx = stream_context_create([
+            'http' => [
+                'timeout' => 8,
+                'method'  => 'GET',
+                'header'  => "User-Agent: ConsertaOS/1.0\r\n",
+            ],
+            'ssl' => ['verify_peer' => false, 'verify_peer_name' => false],
+        ]);
+
+        $resposta = @file_get_contents($url, false, $ctx);
+        if ($resposta === false) {
+            $entrada['erro'] = 'Não foi possível consultar o Packagist (sem conexão ou timeout).';
+            $resultado[] = $entrada;
+            continue;
+        }
+
+        $json = json_decode($resposta, true);
+        if (!$json) {
+            $entrada['erro'] = 'Resposta inválida do Packagist.';
+            $resultado[] = $entrada;
+            continue;
+        }
+
+        // Extrai a versão estável mais recente
+        // O Packagist retorna versões no formato: "package.versions"
+        $versoes = $json['package']['versions'] ?? [];
+        $estavel_mais_recente = null;
+        foreach ($versoes as $tag => $info) {
+            // Ignora dev, alpha, beta, RC e branches
+            if (strpos($tag, 'dev') !== false) continue;
+            if (strpos($tag, 'alpha') !== false) continue;
+            if (strpos($tag, 'beta') !== false) continue;
+            if (strpos($tag, 'RC') !== false) continue;
+            if (strpos($tag, '#') !== false) continue; // branch hash
+            $limpa = ltrim($tag, 'v');
+            if (!preg_match('/^\d+\.\d+/', $limpa)) continue; // apenas x.y...
+            if ($estavel_mais_recente === null || version_compare($limpa, $estavel_mais_recente, '>')) {
+                $estavel_mais_recente = $limpa;
+            }
+        }
+
+        $entrada['disponivel'] = $estavel_mais_recente;
+
+        // Compara versões
+        if ($entrada['instalado'] && $estavel_mais_recente) {
+            $entrada['desatualizado'] = version_compare($entrada['instalado'], $estavel_mais_recente, '<');
+        } elseif (!$entrada['instalado']) {
+            $entrada['erro'] = 'Pacote não encontrado no composer.lock (não instalado?).';
+        }
+
+        $resultado[] = $entrada;
+    }
+
+    resp(200, [
+        'pacotes'       => $resultado,
+        'verificado_em' => date('d/m/Y H:i:s'),
+    ]);
+}
+
 if ($resource === 'nfce_config') {
     auth_required();
     if ($method === 'GET') {
@@ -2250,7 +2988,7 @@ if ($resource === 'nfce') {
         $nf=$s->fetch(); resp($nf ? 200 : 404, $nf ?: ['error'=>'NFC-e não encontrada']);
     }
 
-    if ($method === 'POST') {
+    if ($method === 'POST' && !isset($_GET['action'])) {
         if (!$nfephp_ok) resp(400,['error'=>'NFePHP não instalado. Execute: bash instalar.sh no servidor via SSH.']);
         $csc    = $emp['nfce_csc']    ?? '';
         $pfx_b64= $emp['certificado_pfx'] ?? '';
@@ -2306,11 +3044,69 @@ if ($resource === 'nfce') {
             $cfop_ins         = $data['itens'][0]['cfop'] ?? '5949';
             $serie_ins        = (string)($emp['nfce_serie'] ?? '1');
             $n_prot_ins       = $resultado['nProt'] ?? '';
-            $db->prepare("INSERT INTO nfce_emitidas (os_id,venda_id,status,numero,serie,chave_acesso,valor_total,motivo_rejeicao,n_prot,ambiente,cliente_nome,cfop,payload_json,data_emissao,data_atualizacao) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)")
-               ->execute([$data['os_id']??null,$data['venda_id']??null,$status,$numero,$serie_ins,$resultado['chave']??'',$data['valor_total']??0,$resultado['xMotivo']??'',$n_prot_ins,$config['ambiente'],$cliente_nome_ins,$cfop_ins,json_encode($data),$now,$now]);
+            $os_vinc_ins      = $data['os_vinculada'] ?? '';
+            $data_envio_ins   = $resultado['autorizada'] ? $now : null;
+            $db->prepare("INSERT INTO nfce_emitidas (os_id,venda_id,status,numero,serie,chave_acesso,valor_total,motivo_rejeicao,n_prot,ambiente,cliente_nome,cfop,payload_json,os_vinculada,data_envio,data_emissao,data_atualizacao) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)")
+               ->execute([$data['os_id']??null,$data['venda_id']??null,$status,$numero,$serie_ins,$resultado['chave']??'',$data['valor_total']??0,$resultado['xMotivo']??'',$n_prot_ins,$config['ambiente'],$cliente_nome_ins,$cfop_ins,json_encode($data),$os_vinc_ins,$data_envio_ins,$now,$now]);
             $local_id=(int)$db->lastInsertId();
             if(!$resultado['autorizada'])
-                $db->exec("UPDATE empresa_dados SET nfce_proximo_numero=nfce_proximo_numero-1 WHERE id=1");
+                {} // Número rejeitado é pulado — deve ser inutilizado pelo usuário via Configurações → NFC-e
+            // Gerar conta a receber apenas se autorizada
+            if ($resultado['autorizada']) {
+                // Tenta vincular cliente_id pelo CPF/CNPJ ou pelo nome
+                $cli_id_nfce   = $data['cliente_id'] ?? null;
+                $cli_cpf_nfce  = preg_replace('/\D/', '', $data['cliente_cpf']  ?? '');
+                $cli_cnpj_nfce = preg_replace('/\D/', '', $data['cliente_cnpj'] ?? '');
+                if (!$cli_id_nfce && $cli_cpf_nfce) {
+                    $sq = $db->prepare("SELECT id FROM clientes WHERE REPLACE(REPLACE(REPLACE(cpf,'.',''),'-',''),'/','')=? LIMIT 1");
+                    $sq->execute([$cli_cpf_nfce]);
+                    $cli_id_nfce = $sq->fetchColumn() ?: null;
+                }
+                if (!$cli_id_nfce && $cli_cnpj_nfce) {
+                    $sq = $db->prepare("SELECT id FROM clientes WHERE REPLACE(REPLACE(REPLACE(cpf,'.',''),'-',''),'/','')=? LIMIT 1");
+                    $sq->execute([$cli_cnpj_nfce]);
+                    $cli_id_nfce = $sq->fetchColumn() ?: null;
+                }
+                if (!$cli_id_nfce && $cliente_nome_ins && $cliente_nome_ins !== 'CONSUMIDOR') {
+                    $sq = $db->prepare("SELECT id FROM clientes WHERE LOWER(nome)=LOWER(?) LIMIT 1");
+                    $sq->execute([$cliente_nome_ins]);
+                    $cli_id_nfce = $sq->fetchColumn() ?: null;
+                }
+                // Nome manual como fallback (exibido quando cliente_id não é encontrado)
+                $cli_nome_manual = ($cliente_nome_ins && $cliente_nome_ins !== 'CONSUMIDOR') ? $cliente_nome_ins : '';
+
+                $val_nfce  = (float)($data['valor_total'] ?? 0);
+                $desc_nfce = "NFC-e #{$numero}" . ($cliente_nome_ins && $cliente_nome_ins !== 'CONSUMIDOR' ? " — {$cliente_nome_ins}" : '');
+                // Busca conta_bancaria_id da forma de pagamento informada
+                $cb_id_nfce = null;
+                $fp_id_nfce = $data['forma_pagamento_id'] ?? null;
+                if ($fp_id_nfce) {
+                    $fpRow = $db->prepare("SELECT conta_bancaria FROM formas_pagamento WHERE id=?");
+                    $fpRow->execute([$fp_id_nfce]);
+                    $fpData = $fpRow->fetch();
+                    if ($fpData && !empty($fpData['conta_bancaria'])) {
+                        $cbRow = $db->prepare("SELECT id FROM contas_bancarias WHERE nome=? AND ativo=1 LIMIT 1");
+                        $cbRow->execute([$fpData['conta_bancaria']]);
+                        $cb_id_nfce = $cbRow->fetchColumn() ?: null;
+                    }
+                }
+                // Fallback: tenta via faturamentos se houver
+                if (!$cb_id_nfce && !empty($data['faturamentos'])) {
+                    $fp_id_fat = $data['faturamentos'][0]['forma_pagamento_id'] ?? null;
+                    if ($fp_id_fat) {
+                        $fpRow2 = $db->prepare("SELECT conta_bancaria FROM formas_pagamento WHERE id=?");
+                        $fpRow2->execute([$fp_id_fat]);
+                        $fpData2 = $fpRow2->fetch();
+                        if ($fpData2 && !empty($fpData2['conta_bancaria'])) {
+                            $cbRow2 = $db->prepare("SELECT id FROM contas_bancarias WHERE nome=? AND ativo=1 LIMIT 1");
+                            $cbRow2->execute([$fpData2['conta_bancaria']]);
+                            $cb_id_nfce = $cbRow2->fetchColumn() ?: null;
+                        }
+                    }
+                }
+                $db->prepare("INSERT INTO contas_receber (origem,venda_id,cliente_id,cliente_nome_manual,conta_bancaria_id,descricao,valor,valor_recebido,data_emissao,data_vencimento,data_recebimento,status,data_criacao,data_atualizacao) VALUES ('nfce',?,?,?,?,?,?,?,?,?,?,?,?,?)")
+                   ->execute([$local_id,$cli_id_nfce,$cli_nome_manual,$cb_id_nfce,$desc_nfce,$val_nfce,$val_nfce,date('Y-m-d'),date('Y-m-d'),date('Y-m-d'),'Recebida',$now,$now]);
+            }
             // Sempre retorna 200 para que o frontend leia xMotivo/cStat mesmo em rejeição
             resp(200, array_merge($resultado, ['id'=>$local_id,'numero'=>$numero]));
         } catch(\Exception $e) {
@@ -2336,7 +3132,830 @@ if ($resource === 'nfce') {
             resp(200,['success'=>true]);
         } catch(\Exception $e){ resp(500,['error'=>$e->getMessage()]); }
     }
+
+    // ── POST action=inutilizar — inutiliza faixa de numeração na SEFAZ ──
+    if ($method === 'POST' && isset($_GET['action']) && $_GET['action'] === 'inutilizar') {
+        if (!$nfephp_ok) resp(400, ['error' => 'NFePHP não instalado.']);
+        $pfx_b64 = $emp['certificado_pfx'] ?? '';
+        if (!$pfx_b64) resp(400, ['error' => 'Certificado digital não cadastrado.']);
+
+        $nIni  = (int)($data['n_ini']  ?? 0);
+        $nFin  = (int)($data['n_fin']  ?? $nIni);
+        $just  = trim($data['justificativa'] ?? '');
+        $serie = (int)($data['serie'] ?? ($emp['nfce_serie'] ?? 1));
+        $certSenha = $data['cert_senha'] ?? ($emp['nfce_cert_senha'] ?? '');
+
+        if ($nIni <= 0)          resp(400, ['error' => 'Número inicial inválido.']);
+        if ($nFin < $nIni)       resp(400, ['error' => 'Número final deve ser >= número inicial.']);
+        if (strlen($just) < 15)  resp(400, ['error' => 'Justificativa deve ter no mínimo 15 caracteres.']);
+        if (!$certSenha)         resp(400, ['error' => 'Informe a senha do certificado.']);
+
+        $config_inut = [
+            'ambiente'          => $emp['nfce_ambiente'] ?? 'homologacao',
+            'csc'               => $emp['nfce_csc']    ?? '',
+            'csc_id'            => $emp['nfce_csc_id'] ?? '01',
+            'certificado_pfx'   => $pfx_b64,
+            'certificado_senha' => $certSenha,
+            'storage_dir'       => __DIR__ . '/storage/nfce',
+            'empresa' => [
+                'cnpj'         => $emp['cnpj'],
+                'razao_social' => $emp['razao_social'],
+                'nome_fantasia'=> $emp['nome'],
+                'ie'           => $emp['ie'],
+                'cMun'         => $emp['nfce_cmun'] ?? '',
+                'cUF'          => (int)($emp['nfce_cuf'] ?? 42),
+                'uf'           => $emp['uf'],
+                'logradouro'   => $emp['logradouro'],
+                'numero'       => $emp['numero'],
+                'bairro'       => $emp['bairro'],
+                'cidade'       => $emp['cidade'],
+                'cep'          => $emp['cep'],
+                'telefone'     => $emp['telefone'],
+            ],
+        ];
+
+        try {
+            require_once $autoload;
+            require_once __DIR__ . '/src/NfceService.php';
+            $svc     = new \ConsertaOS\NfcE\NfceService($config_inut);
+            $resultado = $svc->inutilizar($nIni, $nFin, $just, $serie);
+
+            if ($resultado['inutilizado']) {
+                // Registra inutilização no banco para controle
+                $now = date('Y-m-d H:i:s');
+                foreach (range($nIni, $nFin) as $num) {
+                    // Atualiza se já existe como Rejeitada, senão insere
+                    $stEx = $db->prepare("SELECT id FROM nfce_emitidas WHERE numero=? AND serie=? AND status='Rejeitada' LIMIT 1");
+                    $stEx->execute([$num, $serie]);
+                    $idEx = $stEx->fetchColumn();
+                    if ($idEx) {
+                        $db->prepare("UPDATE nfce_emitidas SET status='Inutilizada', motivo_rejeicao=?, data_atualizacao=? WHERE id=?")
+                           ->execute([$just, $now, $idEx]);
+                    } else {
+                        $db->prepare("INSERT INTO nfce_emitidas (status,numero,serie,motivo_rejeicao,ambiente,data_emissao,data_atualizacao) VALUES ('Inutilizada',?,?,?,?,?,?)")
+                           ->execute([$num, $serie, $just, $emp['nfce_ambiente'] ?? 'homologacao', $now, $now]);
+                    }
+                }
+            }
+
+            resp(200, $resultado);
+        } catch (\Exception $e) {
+            resp(500, ['error' => $e->getMessage()]);
+        }
+    }
+
+    // ── POST action=salvar — salva NFC-e em Digitação sem transmitir ──────────
+    if ($method === 'POST' && isset($_GET['action']) && $_GET['action'] === 'salvar') {
+        $now       = date('Y-m-d H:i:s');
+        $cli_nome  = $data['cliente_nome']  ?? '';
+        $val_total = (float)($data['valor_total'] ?? 0);
+        $os_vinc   = $data['os_vinculada']  ?? '';
+        $ambiente  = $data['ambiente']      ?? 'homologacao';
+        $serie     = $data['serie']         ?? ($emp['nfce_serie'] ?? '1');
+        $cfop      = $data['itens'][0]['cfop'] ?? '5949';
+        $payload   = json_encode($data);
+        $db->prepare("INSERT INTO nfce_emitidas (os_id,venda_id,status,numero,serie,chave_acesso,valor_total,motivo_rejeicao,n_prot,ambiente,cliente_nome,cfop,payload_json,os_vinculada,data_emissao,data_atualizacao) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)")
+           ->execute([$data['os_id']??null,$data['venda_id']??null,'Digitação','',$serie,'',$val_total,'','',$ambiente,$cli_nome,$cfop,$payload,$os_vinc,$now,$now]);
+        $local_id = (int)$db->lastInsertId();
+        resp(201,['success'=>true,'id'=>$local_id,'status'=>'Digitação']);
+    }
+
+    // ── PUT — atualiza NFC-e em Digitação (rascunho) ─────────────────────────
+    if ($method === 'PUT' && $id !== null) {
+        $s = $db->prepare("SELECT status FROM nfce_emitidas WHERE id=?"); $s->execute([$id]);
+        $nfAtual = $s->fetch();
+        if (!$nfAtual) resp(404,['error'=>'NFC-e não encontrada']);
+        if ($nfAtual['status'] !== 'Digitação') resp(400,['error'=>'Só é possível editar NFC-e em Digitação']);
+        $now     = date('Y-m-d H:i:s');
+        $fields  = ['cliente_nome','valor_total','ambiente','serie','cfop','os_vinculada','payload_json'];
+        $sets    = []; $vals = [];
+        foreach ($fields as $f) {
+            if (array_key_exists($f, $data)) { $sets[] = "$f=?"; $vals[] = $data[$f]; }
+        }
+        if (isset($data['payload'])) { $sets[] = 'payload_json=?'; $vals[] = json_encode($data['payload']); }
+        $sets[] = 'data_atualizacao=?'; $vals[] = $now;
+        $vals[] = $id;
+        $db->prepare("UPDATE nfce_emitidas SET ".implode(',',$sets)." WHERE id=?")->execute($vals);
+        resp(200,['success'=>true,'id'=>$id]);
+    }
+
     resp(405,['error'=>'Método não permitido']);
 }
+
+
+// ═══════════════════════════════════════════════════════════════════════════
+// NFS-e — Emissão via WebService IPM/Atende.Net (Chapadão do Lageado/SC)
+// Recurso: ?resource=nfse
+// ═══════════════════════════════════════════════════════════════════════════
+
+// ── nfce_exportar — gera ZIP com XMLs e/ou DANFEs filtrados ──────────────────
+if ($resource === 'nfce_exportar') {
+    auth_required();
+
+    // Parâmetros de filtro
+    $status_f   = $_GET['status']      ?? '';
+    $cliente_f  = $_GET['cliente_id']  ?? '';
+    $dt_ini_f   = $_GET['dt_inicio']   ?? '';
+    $dt_fim_f   = $_GET['dt_fim']      ?? '';
+    $inc_xml    = ($_GET['xml']   ?? '0') === '1';
+    $inc_danfe  = ($_GET['danfe'] ?? '0') === '1';
+    $emails_f   = trim($_GET['emails'] ?? '');
+    $modo       = $_GET['modo']        ?? 'download'; // 'download' | 'email'
+
+    if (!$inc_xml && !$inc_danfe) {
+        resp(400, ['error' => 'Selecione ao menos XML ou DANFE para exportar.']);
+    }
+
+    // Monta query com filtros
+    $where = "status NOT IN ('Aguardando','Processando','Digitação','Erro')";
+    $params_e = [];
+
+    if ($status_f) {
+        $where .= ' AND status = ?';
+        $params_e[] = $status_f;
+    }
+    if ($cliente_f) {
+        // Filtra pelo nome do cliente a partir do id informado
+        $cliRow = $db->prepare("SELECT nome FROM clientes WHERE id = ?");
+        $cliRow->execute([(int)$cliente_f]);
+        $cliNome = $cliRow->fetchColumn();
+        if ($cliNome) {
+            $where .= ' AND cliente_nome = ?';
+            $params_e[] = $cliNome;
+        }
+    }
+    if ($dt_ini_f) {
+        $where .= ' AND DATE(data_emissao) >= ?';
+        $params_e[] = $dt_ini_f;
+    }
+    if ($dt_fim_f) {
+        $where .= ' AND DATE(data_emissao) <= ?';
+        $params_e[] = $dt_fim_f;
+    }
+
+    $stmt = $db->prepare("SELECT * FROM nfce_emitidas WHERE $where ORDER BY id DESC LIMIT 500");
+    $stmt->execute($params_e);
+    $notas = $stmt->fetchAll();
+
+    if (empty($notas)) {
+        resp(404, ['error' => 'Nenhuma NFC-e encontrada com os filtros informados.']);
+    }
+
+    $storageDir = __DIR__ . '/storage/nfce';
+    $tmpDir     = sys_get_temp_dir() . '/nfce_exp_' . uniqid();
+    mkdir($tmpDir, 0755, true);
+
+    $adicionados = 0;
+    foreach ($notas as $nf) {
+        $num    = (string)($nf['numero'] ?? '');
+        $status = strtolower($nf['status'] ?? '');
+        $subDir = ($status === 'autorizada' || $status === 'aprovada') ? 'autorizada' : 'rejeitada';
+
+        if ($inc_xml) {
+            $xmlPath = "$storageDir/$subDir/{$num}.xml";
+            if (file_exists($xmlPath)) {
+                copy($xmlPath, "$tmpDir/NFC-e_{$num}.xml");
+                $adicionados++;
+            } else {
+                // Fallback: XML minimo gerado a partir do payload_json
+                $payload = json_decode($nf['payload_json'] ?? '{}', true);
+                if ($payload) {
+                    $xmlFallback  = '<?xml version="1.0" encoding="UTF-8"?>' . "\n";
+                    $xmlFallback .= '<!-- NFC-e #' . $num . ' | Chave: ' . ($nf['chave_acesso'] ?? '') . ' | Status: ' . ($nf['status'] ?? '') . ' -->' . "\n";
+                    $xmlFallback .= '<NFC-e numero="' . $num . '" chave="' . ($nf['chave_acesso'] ?? '') . '" status="' . ($nf['status'] ?? '') . '" valor="' . ($nf['valor_total'] ?? 0) . '"/>';
+                    file_put_contents("$tmpDir/NFC-e_{$num}.xml", $xmlFallback);
+                    $adicionados++;
+                }
+            }
+        }
+
+        if ($inc_danfe) {
+            $pdfGerado = false;
+
+            // Tenta gerar DANFE em PDF usando sped-da (NFePHP\DA\NFe\Danfce)
+            $xmlPath   = "$storageDir/$subDir/{$num}.xml";
+            $autoload  = __DIR__ . '/nfephp/vendor/autoload.php';
+            if (file_exists($xmlPath) && file_exists($autoload)) {
+                try {
+                    require_once $autoload;
+                    // sped-da >= 1.1: classe para NFC-e
+                    if (class_exists('NFePHP\DA\NFe\Danfce')) {
+                        $xmlContent = file_get_contents($xmlPath);
+                        $danfce = new \NFePHP\DA\NFe\Danfce($xmlContent);
+                        $pdfContent = $danfce->render();
+                        file_put_contents("$tmpDir/DANFE_{$num}.pdf", $pdfContent);
+                        $pdfGerado = true;
+                        $adicionados++;
+                    }
+                } catch (\Exception $eDanfe) {
+                    // falha na geracao do PDF — cai no fallback abaixo
+                    $pdfGerado = false;
+                }
+            }
+
+            // Fallback: gera PDF simples via FPDF (dependencia interna do sped-da)
+            if (!$pdfGerado && file_exists($autoload)) {
+                try {
+                    require_once $autoload;
+                    if (class_exists('FPDF') || class_exists('tFPDF')) {
+                        $fpdf = class_exists('tFPDF') ? new \tFPDF('P', 'mm', [80, 200]) : new \FPDF('P', 'mm', [80, 200]);
+                        $fpdf->AddPage();
+                        $fpdf->SetFont('Arial', 'B', 10);
+                        $fpdf->Cell(0, 6, 'DANFE NFC-e #' . $num, 0, 1, 'C');
+                        $fpdf->SetFont('Arial', '', 7);
+                        $fpdf->Cell(0, 5, 'Status: ' . ($nf['status'] ?? '-'), 0, 1);
+                        $fpdf->Cell(0, 5, 'Cliente: ' . mb_substr($nf['cliente_nome'] ?? 'Consumidor Final', 0, 40), 0, 1);
+                        $fpdf->Cell(0, 5, 'Emissao: ' . substr($nf['data_emissao'] ?? '-', 0, 16), 0, 1);
+                        $fpdf->Cell(0, 5, 'Valor: R$ ' . number_format((float)($nf['valor_total'] ?? 0), 2, ',', '.'), 0, 1);
+                        $fpdf->Ln(2);
+                        $payload = json_decode($nf['payload_json'] ?? '{}', true);
+                        foreach (($payload['itens'] ?? []) as $it) {
+                            $linha = mb_substr($it['descricao'] ?? '', 0, 30) . ' x' . ($it['quantidade'] ?? 1) . ' R$' . number_format((float)($it['valor_total'] ?? 0), 2, ',', '.');
+                            $fpdf->Cell(0, 4, $linha, 0, 1);
+                        }
+                        $fpdf->Ln(2);
+                        $chaveFormatada = wordwrap($nf['chave_acesso'] ?? '', 11, ' ', true);
+                        $fpdf->SetFont('Arial', '', 6);
+                        $fpdf->MultiCell(0, 3, 'Chave: ' . $chaveFormatada, 0, 'C');
+                        $pdfContent = $fpdf->Output('S');
+                        file_put_contents("$tmpDir/DANFE_{$num}.pdf", $pdfContent);
+                        $pdfGerado = true;
+                        $adicionados++;
+                    }
+                } catch (\Exception $eFpdf) {
+                    $pdfGerado = false;
+                }
+            }
+
+            // Ultimo fallback: se nao conseguiu PDF, pula esta nota (nao gera .txt)
+            if (!$pdfGerado) {
+                // Registra no log mas nao interrompe a exportacao das demais notas
+                error_log('nfce_exportar: nao foi possivel gerar PDF para NFC-e #' . $num);
+            }
+        }
+    }
+
+    if ($adicionados === 0) {
+        // Limpa pasta temp
+        array_map('unlink', glob("$tmpDir/*"));
+        rmdir($tmpDir);
+        resp(404, ['error' => 'Nenhum arquivo encontrado no storage para as notas filtradas.']);
+    }
+
+    // Compacta tudo em ZIP
+    $zipPath = sys_get_temp_dir() . '/nfce_exportacao_' . date('Ymd_His') . '.zip';
+    $zip = new ZipArchive();
+    if ($zip->open($zipPath, ZipArchive::CREATE | ZipArchive::OVERWRITE) !== true) {
+        resp(500, ['error' => 'Erro ao criar arquivo ZIP.']);
+    }
+    foreach (glob("$tmpDir/*") as $f) {
+        $zip->addFile($f, basename($f));
+    }
+    $zip->close();
+
+    // Limpa pasta temp
+    array_map('unlink', glob("$tmpDir/*"));
+    rmdir($tmpDir);
+
+    if ($modo === 'email') {
+        // Envia por e-mail
+        if (empty($emails_f)) {
+            resp(400, ['error' => 'Informe o e-mail do destinatário para envio.']);
+        }
+        $destinatarios = array_filter(array_map('trim', explode(',', $emails_f)));
+        $empresa       = $db->query("SELECT nome, razao_social FROM empresa_dados WHERE id=1")->fetch();
+        $nomeEmp       = $empresa['nome'] ?: ($empresa['razao_social'] ?: 'ConsertaOS');
+        $zipBase64     = base64_encode(file_get_contents($zipPath));
+        $zipNome       = 'NFC-e_exportacao_' . date('d-m-Y') . '.zip';
+
+        $crlf      = "\r\n";
+        $boundary  = md5(uniqid());
+        $headers   = 'From: ' . $nomeEmp . ' <no-reply@consertaos.com.br>' . $crlf;
+        $headers  .= 'MIME-Version: 1.0' . $crlf;
+        $headers  .= 'Content-Type: multipart/mixed; boundary="' . $boundary . '"' . $crlf;
+
+        $body  = '--' . $boundary . $crlf;
+        $body .= 'Content-Type: text/plain; charset=UTF-8' . $crlf . $crlf;
+        $body .= 'Segue em anexo a exportacao de NFC-e gerada em ' . date('d/m/Y H:i') . '.' . $crlf;
+        $body .= 'Total de arquivos: ' . $adicionados . ' | Notas: ' . count($notas) . $crlf . $crlf;
+        $body .= '--' . $boundary . $crlf;
+        $body .= 'Content-Type: application/zip; name="' . $zipNome . '"' . $crlf;
+        $body .= 'Content-Transfer-Encoding: base64' . $crlf;
+        $body .= 'Content-Disposition: attachment; filename="' . $zipNome . '"' . $crlf . $crlf;
+        $body .= chunk_split($zipBase64) . $crlf;
+        $body .= '--' . $boundary . '--';
+
+        $enviados = 0;
+        foreach ($destinatarios as $dest) {
+            if (filter_var($dest, FILTER_VALIDATE_EMAIL)) {
+                $assunto = "Exportação NFC-e — " . date('d/m/Y');
+                if (mail($dest, $assunto, $body, $headers)) {
+                    $enviados++;
+                }
+            }
+        }
+
+        @unlink($zipPath);
+        resp(200, ['ok' => true, 'enviados' => $enviados, 'total_notas' => count($notas)]);
+    }
+
+    // Modo download — envia o ZIP diretamente
+    $zipNome = 'NFC-e_exportacao_' . date('Ymd_His') . '.zip';
+    header('Content-Type: application/zip');
+    header('Content-Disposition: attachment; filename="' . $zipNome . '"');
+    header('Content-Length: ' . filesize($zipPath));
+    header('Cache-Control: no-cache');
+    readfile($zipPath);
+    @unlink($zipPath);
+    exit;
+}
+
+
+// ── GET nfse_cfg — lê/salva configurações NFS-e ─────────────────────────────
+if ($resource === 'nfse_cfg') {
+    auth_required();
+    if ($method === 'GET') {
+        $r = $db->query("SELECT nfse_usuario,nfse_senha,nfse_cidade_tom,nfse_serie,nfse_ambiente,nfse_proximo_numero,nfse_usa_unidade,cnpj,razao_social,nome,ie,im,regime_tributario,cep,logradouro,numero,complemento,bairro,cidade,uf,telefone FROM empresa_dados WHERE id=1")->fetch();
+        resp(200, $r ?: []);
+    }
+    if ($method === 'POST') {
+        $fields = ['nfse_usuario','nfse_senha','nfse_cidade_tom','nfse_serie','nfse_ambiente','nfse_proximo_numero','nfse_usa_unidade'];
+        $sets=[]; $vals=[];
+        foreach($fields as $f){ if(isset($data[$f])){ $sets[]="$f=?"; $vals[]=$data[$f]; } }
+        if(empty($sets)) resp(400,['error'=>'Nenhum campo enviado']);
+        $vals[]=1;
+        $db->prepare("UPDATE empresa_dados SET ".implode(',',$sets)." WHERE id=?")->execute($vals);
+        resp(200,['success'=>true]);
+    }
+    resp(405,['error'=>'Método não permitido']);
+}
+
+// ── GET/POST/DELETE nfse — listagem, emissão e cancelamento ────────────────
+if ($resource === 'nfse') {
+    auth_required();
+
+    // ── GET: listagem ou nota individual ──────────────────────────────────
+    if ($method === 'GET') {
+        if ($id !== null) {
+            $s = $db->prepare("SELECT * FROM nfse_emitidas WHERE id=?");
+            $s->execute([$id]);
+            $nf = $s->fetch();
+            if (!$nf) resp(404, ['error' => 'NFS-e não encontrada']);
+            resp(200, $nf);
+        }
+        // Listagem com filtros opcionais
+        $where  = '1=1';
+        $params = [];
+        if (!empty($_GET['status']))  { $where .= " AND status=?";  $params[] = $_GET['status']; }
+        if (!empty($_GET['q'])) {
+            $where .= " AND (numero LIKE ? OR cliente_nome LIKE ? OR cliente_cpfcnpj LIKE ?)";
+            $q = '%'.$_GET['q'].'%';
+            $params = array_merge($params, [$q, $q, $q]);
+        }
+        $limit = max(1, min(200, (int)($_GET['limit'] ?? 100)));
+        $page  = max(1, (int)($_GET['page']  ?? 1));
+        $offset = ($page - 1) * $limit;
+        $s = $db->prepare("SELECT * FROM nfse_emitidas WHERE $where ORDER BY id DESC LIMIT $limit OFFSET $offset");
+        $s->execute($params);
+        resp(200, $s->fetchAll());
+    }
+
+    // ── POST: emitir nova NFS-e ────────────────────────────────────────────
+    if ($method === 'POST' && $action === 'emitir') {
+        // Valida campos mínimos
+        if (empty($data['itens']) || !is_array($data['itens'])) {
+            resp(400, ['error' => 'Itens da nota são obrigatórios']);
+        }
+        if (empty($data['valor_total']) || (float)$data['valor_total'] <= 0) {
+            resp(400, ['error' => 'Valor total inválido']);
+        }
+
+        $emp = $db->query("SELECT * FROM empresa_dados WHERE id=1")->fetch();
+
+        $nfseUsuario   = $emp['nfse_usuario']    ?? '';
+        $nfseSenha     = $emp['nfse_senha']       ?? '';
+        $nfseCidadeTom = $emp['nfse_cidade_tom']  ?? '';
+
+        if (empty($nfseUsuario) || empty($nfseSenha)) {
+            resp(400, ['error' => 'Configure o usuário e senha NFS-e em Configurações → NFS-e antes de emitir.']);
+        }
+        if (empty($nfseCidadeTom)) {
+            resp(400, ['error' => 'Configure o Código TOM da cidade em Configurações → NFS-e antes de emitir.']);
+        }
+
+        $config = [
+            'nfse_usuario'    => $nfseUsuario,
+            'nfse_senha'      => $nfseSenha,
+            'nfse_cidade_tom' => $nfseCidadeTom,
+            'nfse_serie'      => $emp['nfse_serie']       ?? '1',
+            'nfse_ambiente'   => $emp['nfse_ambiente']    ?? 'homologacao',
+            'nfse_usa_unidade'=> (int)($emp['nfse_usa_unidade'] ?? 0),
+            'storage_dir'     => __DIR__ . '/storage/nfse',
+            'empresa' => [
+                'cnpj'        => $emp['cnpj']         ?? '',
+                'razao_social'=> $emp['razao_social']  ?? '',
+                'im'          => $emp['im']            ?? '',
+                'cidade_tom'  => $nfseCidadeTom,
+            ],
+        ];
+
+        // Incrementa número com lock
+        $db->beginTransaction();
+        $numero = (int)$db->query("SELECT nfse_proximo_numero FROM empresa_dados WHERE id=1")->fetchColumn();
+        $db->exec("UPDATE empresa_dados SET nfse_proximo_numero=nfse_proximo_numero+1 WHERE id=1");
+        $db->commit();
+
+        try {
+            require_once __DIR__ . '/src/NfseService.php';
+            $svc       = new \ConsertaOS\NfsE\NfseService($config);
+            $resultado = $svc->emitir($data);
+
+            $now          = date('Y-m-d H:i:s');
+            $status       = $resultado['autorizada'] ? 'Autorizada' : 'Rejeitada';
+            $clienteNome  = $data['cliente_nome']    ?? '';
+            $clienteDoc   = preg_replace('/\D/', '', $data['cliente_cpfcnpj'] ?? '');
+
+            $db->prepare("INSERT INTO nfse_emitidas
+                (os_id,venda_id,status,numero,serie,codigo_verificacao,valor_total,link_pdf,motivo_rejeicao,ambiente,payload_json,cliente_nome,cliente_cpfcnpj,data_emissao,data_atualizacao)
+                VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)")
+               ->execute([
+                    $data['os_id']     ?? null,
+                    $data['venda_id']  ?? null,
+                    $status,
+                    $resultado['numero']              ?? '',
+                    $resultado['serie']               ?? ($emp['nfse_serie'] ?? '1'),
+                    $resultado['codigo_verificacao']  ?? '',
+                    $data['valor_total'],
+                    $resultado['link_pdf']            ?? '',
+                    $resultado['xMotivo']             ?? '',
+                    $config['nfse_ambiente'],
+                    json_encode($data),
+                    $clienteNome,
+                    $clienteDoc,
+                    $now, $now,
+               ]);
+
+            $local_id = (int)$db->lastInsertId();
+
+            // Se rejeitada, devolve o contador
+            if (!$resultado['autorizada']) {
+                $db->exec("UPDATE empresa_dados SET nfse_proximo_numero=nfse_proximo_numero-1 WHERE id=1");
+            }
+            // Gerar conta a receber apenas se autorizada
+            if ($resultado['autorizada']) {
+                $cli_id_nfse  = $data['cliente_id']    ?? null;
+                $val_nfse     = (float)($data['valor_total'] ?? 0);
+                $num_nfse     = $resultado['numero']    ?? $numero;
+                $cli_nome_nfse= $data['cliente_nome']   ?? '';
+                $desc_nfse    = "NFS-e #{$num_nfse} — {$cli_nome_nfse}";
+                // Busca conta_bancaria_id da forma de pagamento informada
+                $cb_id_nfse = null;
+                $fp_id_nfse = $data['forma_pagamento_id'] ?? null;
+                if ($fp_id_nfse) {
+                    $fpRow = $db->prepare("SELECT conta_bancaria FROM formas_pagamento WHERE id=?");
+                    $fpRow->execute([$fp_id_nfse]);
+                    $fpData = $fpRow->fetch();
+                    if ($fpData && !empty($fpData['conta_bancaria'])) {
+                        $cbRow = $db->prepare("SELECT id FROM contas_bancarias WHERE nome=? AND ativo=1 LIMIT 1");
+                        $cbRow->execute([$fpData['conta_bancaria']]);
+                        $cb_id_nfse = $cbRow->fetchColumn() ?: null;
+                    }
+                }
+                // Fallback: tenta via faturamentos se houver
+                if (!$cb_id_nfse && !empty($data['faturamentos'])) {
+                    $fp_id_fat = $data['faturamentos'][0]['forma_pagamento_id'] ?? null;
+                    if ($fp_id_fat) {
+                        $fpRow2 = $db->prepare("SELECT conta_bancaria FROM formas_pagamento WHERE id=?");
+                        $fpRow2->execute([$fp_id_fat]);
+                        $fpData2 = $fpRow2->fetch();
+                        if ($fpData2 && !empty($fpData2['conta_bancaria'])) {
+                            $cbRow2 = $db->prepare("SELECT id FROM contas_bancarias WHERE nome=? AND ativo=1 LIMIT 1");
+                            $cbRow2->execute([$fpData2['conta_bancaria']]);
+                            $cb_id_nfse = $cbRow2->fetchColumn() ?: null;
+                        }
+                    }
+                }
+                $db->prepare("INSERT INTO contas_receber (origem,venda_id,cliente_id,conta_bancaria_id,descricao,valor,valor_recebido,data_emissao,data_vencimento,data_recebimento,status,data_criacao,data_atualizacao) VALUES ('nfse',?,?,?,?,?,?,?,?,?,?,?,?)")
+                   ->execute([$local_id,$cli_id_nfse,$cb_id_nfse,$desc_nfse,$val_nfse,$val_nfse,date('Y-m-d'),date('Y-m-d'),date('Y-m-d'),'Recebida',$now,$now]);
+            }
+
+            resp(200, array_merge($resultado, ['id' => $local_id, 'numero_seq' => $numero]));
+
+        } catch (\Exception $e) {
+            $db->exec("UPDATE empresa_dados SET nfse_proximo_numero=nfse_proximo_numero-1 WHERE id=1");
+            resp(500, ['error' => $e->getMessage()]);
+        }
+    }
+
+    // ── DELETE: cancelar NFS-e ─────────────────────────────────────────────
+    if ($method === 'DELETE' && $id !== null) {
+        $s = $db->prepare("SELECT * FROM nfse_emitidas WHERE id=?");
+        $s->execute([$id]);
+        $nf = $s->fetch();
+        if (!$nf) resp(404, ['error' => 'NFS-e não encontrada']);
+
+        $motivo = trim($data['motivo'] ?? '');
+        if (strlen($motivo) < 10) resp(400, ['error' => 'Motivo do cancelamento deve ter ao menos 10 caracteres']);
+
+        $emp    = $db->query("SELECT * FROM empresa_dados WHERE id=1")->fetch();
+        $config = [
+            'nfse_usuario'    => $emp['nfse_usuario']    ?? '',
+            'nfse_senha'      => $emp['nfse_senha']       ?? '',
+            'nfse_cidade_tom' => $emp['nfse_cidade_tom']  ?? '',
+            'nfse_serie'      => $emp['nfse_serie']       ?? '1',
+            'nfse_ambiente'   => $emp['nfse_ambiente']    ?? 'homologacao',
+            'storage_dir'     => __DIR__ . '/storage/nfse',
+            'empresa' => [
+                'cnpj'      => $emp['cnpj']        ?? '',
+                'cidade_tom'=> $emp['nfse_cidade_tom'] ?? '',
+            ],
+        ];
+
+        try {
+            require_once __DIR__ . '/src/NfseService.php';
+            $svc       = new \ConsertaOS\NfsE\NfseService($config);
+            // Tenta cancelamento direto; se retornar erro de prazo, tenta solicitação
+            $resultado = $svc->cancelar($nf['numero'], $nf['serie'], $motivo, false);
+
+            if (!$resultado['autorizada'] && isset($resultado['codigo']) && $resultado['codigo'] !== 'CURL_ERROR') {
+                // Segunda tentativa: solicitação de cancelamento
+                $resultado = $svc->cancelar($nf['numero'], $nf['serie'], $motivo, true);
+            }
+
+            if ($resultado['autorizada']) {
+                $db->prepare("UPDATE nfse_emitidas SET status='Cancelada', data_atualizacao=? WHERE id=?")
+                   ->execute([date('Y-m-d H:i:s'), $id]);
+            }
+
+            resp(200, $resultado);
+
+        } catch (\Exception $e) {
+            resp(500, ['error' => $e->getMessage()]);
+        }
+    }
+
+    resp(405, ['error' => 'Método não permitido']);
+}
+
+// ─── NFS-e UNIDADES — tabela completa de Chapadão do Lageado (relatório 10/04/2026) ───
+if ($resource === 'nfse_unidades' && $method === 'GET') {
+    auth_required();
+    $unidades = [
+        ['codigo'=>1,  'sigla'=>'PTO',      'descricao'=>'PONTO'],
+        ['codigo'=>2,  'sigla'=>'AMP',      'descricao'=>'AMPOLAS'],
+        ['codigo'=>3,  'sigla'=>'B',        'descricao'=>'BARRAS'],
+        ['codigo'=>4,  'sigla'=>'BDJ',      'descricao'=>'BANDEIJA'],
+        ['codigo'=>5,  'sigla'=>'BLD',      'descricao'=>'BALDE'],
+        ['codigo'=>6,  'sigla'=>'BLO',      'descricao'=>'BLOCOS'],
+        ['codigo'=>7,  'sigla'=>'BSN',      'descricao'=>'BISNAGA'],
+        ['codigo'=>8,  'sigla'=>'CAPS',     'descricao'=>'CAPSULAS'],
+        ['codigo'=>9,  'sigla'=>'CART',     'descricao'=>'CARTELAS'],
+        ['codigo'=>10, 'sigla'=>'CJ',       'descricao'=>'CONJUNTO'],
+        ['codigo'=>11, 'sigla'=>'CM/C',     'descricao'=>'CENTÍMETRO/COLUNA'],
+        ['codigo'=>12, 'sigla'=>'CM²',      'descricao'=>'CENTIMETRO QUADRADO'],
+        ['codigo'=>13, 'sigla'=>'COL',      'descricao'=>'COLEÇÃO'],
+        ['codigo'=>14, 'sigla'=>'COMP',     'descricao'=>'COMPRIMIDO'],
+        ['codigo'=>15, 'sigla'=>'CON',      'descricao'=>'CONSULTA'],
+        ['codigo'=>16, 'sigla'=>'CR',       'descricao'=>'CARGA'],
+        ['codigo'=>17, 'sigla'=>'CX',       'descricao'=>'CAIXA'],
+        ['codigo'=>18, 'sigla'=>'DIA',      'descricao'=>'DIA'],
+        ['codigo'=>19, 'sigla'=>'DR',       'descricao'=>'DIARIA'],
+        ['codigo'=>20, 'sigla'=>'DZ',       'descricao'=>'DUZIAS'],
+        ['codigo'=>21, 'sigla'=>'ENV',      'descricao'=>'ENVELOPE'],
+        ['codigo'=>22, 'sigla'=>'EPG',      'descricao'=>'ESPIGA'],
+        ['codigo'=>23, 'sigla'=>'EXE.',     'descricao'=>'EXEMPLARES'],
+        ['codigo'=>24, 'sigla'=>'FLS',      'descricao'=>'FOLHAS'],
+        ['codigo'=>25, 'sigla'=>'FRD',      'descricao'=>'FARDO'],
+        ['codigo'=>26, 'sigla'=>'FRS',      'descricao'=>'FRASCO'],
+        ['codigo'=>27, 'sigla'=>'FX',       'descricao'=>'FEIXE'],
+        ['codigo'=>28, 'sigla'=>'GL',       'descricao'=>'GALÃO'],
+        ['codigo'=>29, 'sigla'=>'GR',       'descricao'=>'GRAMAS'],
+        ['codigo'=>30, 'sigla'=>'HR',       'descricao'=>'HORAS'],
+        ['codigo'=>31, 'sigla'=>'JG',       'descricao'=>'JOGOS'],
+        ['codigo'=>32, 'sigla'=>'KG',       'descricao'=>'KILOGRAMA'],
+        ['codigo'=>33, 'sigla'=>'KIT',      'descricao'=>'KIT'],
+        ['codigo'=>34, 'sigla'=>'KM',       'descricao'=>'KILOMETRO'],
+        ['codigo'=>35, 'sigla'=>'KM/DI',    'descricao'=>'KILOMETRO/DIA'],
+        ['codigo'=>36, 'sigla'=>'LT',       'descricao'=>'LITRO'],
+        ['codigo'=>37, 'sigla'=>'LTA',      'descricao'=>'LATA'],
+        ['codigo'=>38, 'sigla'=>'MLH',      'descricao'=>'MILHEIRO'],
+        ['codigo'=>39, 'sigla'=>'MT',       'descricao'=>'METRO'],
+        ['codigo'=>40, 'sigla'=>'M²',       'descricao'=>'METRO QUADRADO'],
+        ['codigo'=>41, 'sigla'=>'M³',       'descricao'=>'METRO CUBICO'],
+        ['codigo'=>42, 'sigla'=>'MÇS',      'descricao'=>'MAÇOS'],
+        ['codigo'=>43, 'sigla'=>'MÊS',      'descricao'=>'MÊS'],
+        ['codigo'=>44, 'sigla'=>'P',        'descricao'=>'PERÍODO'],
+        ['codigo'=>45, 'sigla'=>'PARES',    'descricao'=>'PARES'],
+        ['codigo'=>46, 'sigla'=>'PART.',    'descricao'=>'PARTIDA'],
+        ['codigo'=>47, 'sigla'=>'PCT',      'descricao'=>'PACOTE'],
+        ['codigo'=>48, 'sigla'=>'PG',       'descricao'=>'PÁGINA'],
+        ['codigo'=>49, 'sigla'=>'PT',       'descricao'=>'POTE'],
+        ['codigo'=>50, 'sigla'=>'PÁ',       'descricao'=>'PÁ'],
+        ['codigo'=>51, 'sigla'=>'PÇ',       'descricao'=>'PEÇA'],
+        ['codigo'=>52, 'sigla'=>'RL',       'descricao'=>'ROLO'],
+        ['codigo'=>53, 'sigla'=>'RS',       'descricao'=>'RESMA'],
+        ['codigo'=>54, 'sigla'=>'SC',       'descricao'=>'SACA'],
+        ['codigo'=>55, 'sigla'=>'SERV',     'descricao'=>'SERVIÇO'],
+        ['codigo'=>56, 'sigla'=>'SM',       'descricao'=>'SEMANAL'],
+        ['codigo'=>57, 'sigla'=>'TB',       'descricao'=>'TUBO'],
+        ['codigo'=>58, 'sigla'=>'TBR',      'descricao'=>'TAMBOR'],
+        ['codigo'=>59, 'sigla'=>'TON',      'descricao'=>'TONELADA'],
+        ['codigo'=>60, 'sigla'=>'TR',       'descricao'=>'TIRAS'],
+        ['codigo'=>61, 'sigla'=>'FCNT',     'descricao'=>'FLACONETE'],
+        ['codigo'=>62, 'sigla'=>'SA',       'descricao'=>'SACHE'],
+        ['codigo'=>63, 'sigla'=>'SS',       'descricao'=>'SESSÃO'],
+        ['codigo'=>64, 'sigla'=>'UN',       'descricao'=>'UNIDADE'],
+        ['codigo'=>71, 'sigla'=>'UNI',      'descricao'=>'UNIDADE INSERIDA'],
+        ['codigo'=>72, 'sigla'=>'CX AMP',   'descricao'=>'CAIXA COM 4 AMPOLAS'],
+        ['codigo'=>73, 'sigla'=>'LOCAÇÃO',  'descricao'=>'LOCAÇÃO'],
+        ['codigo'=>75, 'sigla'=>'PESSOAS',  'descricao'=>'PESSOAS'],
+        ['codigo'=>76, 'sigla'=>'resma',    'descricao'=>'Resma'],
+        ['codigo'=>80, 'sigla'=>'UN.',      'descricao'=>'IMPLEMENTO'],
+        ['codigo'=>81, 'sigla'=>'aux',      'descricao'=>'Auxílio'],
+        ['codigo'=>82, 'sigla'=>'HA',       'descricao'=>'HECTARE'],
+        ['codigo'=>83, 'sigla'=>'1',        'descricao'=>'item'],
+        ['codigo'=>84, 'sigla'=>'VB',       'descricao'=>'Verba'],
+        ['codigo'=>85, 'sigla'=>'M³xKM',    'descricao'=>'Metro cubico x Quilometro rodado'],
+        ['codigo'=>86, 'sigla'=>'M',        'descricao'=>'METRO'],
+        ['codigo'=>88, 'sigla'=>'vidro',    'descricao'=>'Vidro'],
+        ['codigo'=>89, 'sigla'=>'PACOTE',   'descricao'=>'PACOTE COM 12 UNIDADES'],
+        ['codigo'=>90, 'sigla'=>'KM/Rod',   'descricao'=>'Quilometro rodado'],
+        ['codigo'=>91, 'sigla'=>'GRF',      'descricao'=>'GARRAFA'],
+        ['codigo'=>92, 'sigla'=>'CJDIA',    'descricao'=>'CJDIA'],
+        ['codigo'=>93, 'sigla'=>'saco',     'descricao'=>'saco'],
+        ['codigo'=>94, 'sigla'=>'EMB',      'descricao'=>'Embalagem'],
+        ['codigo'=>95, 'sigla'=>'TKM',      'descricao'=>'TONELADA KILOMETRO'],
+    ];
+    resp(200, $unidades);
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// IDENTIFICAR APARELHO VIA GEMINI AI
+// POST api.php?resource=identificar_aparelho
+// Body JSON: { "imagem_base64": "...", "mime_type": "image/jpeg" }
+// ─────────────────────────────────────────────────────────────────────────────
+if ($resource === 'identificar_aparelho' && $method === 'POST') {
+    auth_required();
+
+    // ⚠️  COLOQUE SUA CHAVE AQUI (copie do Google AI Studio)
+    $gemini_api_key = defined('GEMINI_API_KEY') ? GEMINI_API_KEY : '';
+
+    $imagem_base64 = trim($data['imagem_base64'] ?? '');
+    $mime_type     = trim($data['mime_type']     ?? 'image/jpeg');
+
+    if ($imagem_base64 === '') {
+        resp(400, ['success' => false, 'error' => 'Imagem não recebida.']);
+    }
+
+    // Tipos MIME permitidos
+    $mimes_permitidos = ['image/jpeg', 'image/jpg', 'image/png', 'image/webp', 'image/gif'];
+    if (!in_array(strtolower($mime_type), $mimes_permitidos)) {
+        resp(400, ['success' => false, 'error' => 'Tipo de imagem não suportado: ' . $mime_type]);
+    }
+
+    // ── Lista de modelos em ordem de preferência (fallback automático) ──────────
+    // Se o primeiro estiver sobrecarregado ou indisponível, tenta o próximo.
+    $modelos_fallback = [
+        'gemini-3.1-flash-lite-preview',  // Maior cota — 500 RPD grátis
+        'gemini-3-flash-preview',          // Fallback 1 — 20 RPD grátis
+        'gemini-2.5-flash',                // Fallback 2 — 20 RPD grátis
+    ];
+
+    $prompt = <<<PROMPT
+Você é um especialista em identificação de aparelhos eletrônicos.
+Analise esta imagem e identifique o modelo do celular/smartphone.
+
+Responda APENAS com um objeto JSON válido, sem nenhum texto antes ou depois, sem blocos de código markdown.
+
+Formato exato:
+{"marca":"Samsung","modelo":"Galaxy A54 5G","confianca":"alta","observacoes":"Logotipo Samsung camera tripla"}
+
+Regras:
+- "marca": nome da fabricante (Samsung, Apple, Motorola, Xiaomi, etc). null se não identificado.
+- "modelo": modelo específico do aparelho. null se não identificado.
+- "confianca": "alta" se tem certeza, "media" se razoavelmente certo, "baixa" se incerto.
+- "observacoes": explicação curtíssima, máximo 40 caracteres, sem vírgulas nem pontuação especial.
+- Se não for um celular/smartphone, retorne: {"marca":null,"modelo":null,"confianca":"baixa","observacoes":"Imagem nao parece ser celular"}
+PROMPT;
+
+    // Função auxiliar: verifica se um erro indica sobrecarga/indisponibilidade
+    $eh_erro_transitorio = function(int $code, string $raw): bool {
+        if ($code === 503 || $code === 429) return true;
+        if ($raw === '') return false;
+        $dec = json_decode($raw, true);
+        $msg = strtolower($dec['error']['message'] ?? '');
+        return (
+            str_contains($msg, 'high demand')   ||
+            str_contains($msg, 'overloaded')     ||
+            str_contains($msg, 'try again')      ||
+            str_contains($msg, 'unavailable')    ||
+            str_contains($msg, 'not found')      ||
+            str_contains($msg, 'not supported')  ||
+            str_contains($msg, 'quota')
+        );
+    };
+
+    $response_raw     = '';
+    $http_code        = 0;
+    $curl_error       = '';
+    $modelo_usado     = '';
+    $sucesso          = false;
+
+    foreach ($modelos_fallback as $modelo) {
+        $url_modelo = "https://generativelanguage.googleapis.com/v1beta/models/{$modelo}:generateContent?key={$gemini_api_key}";
+
+        $payload = [
+            'contents' => [[
+                'parts' => [
+                    [
+                        'inline_data' => [
+                            'mime_type' => $mime_type,
+                            'data'      => $imagem_base64,
+                        ]
+                    ],
+                    ['text' => $prompt]
+                ]
+            ]],
+            'generationConfig' => [
+                'temperature'     => 0.1,
+                'maxOutputTokens' => 2048,
+            ]
+        ];
+
+        // Tenta 2 vezes por modelo antes de passar para o próximo
+        for ($t = 1; $t <= 2; $t++) {
+            $ch = curl_init($url_modelo);
+            curl_setopt_array($ch, [
+                CURLOPT_RETURNTRANSFER => true,
+                CURLOPT_POST           => true,
+                CURLOPT_HTTPHEADER     => ['Content-Type: application/json'],
+                CURLOPT_POSTFIELDS     => json_encode($payload, JSON_UNESCAPED_UNICODE),
+                CURLOPT_TIMEOUT        => 45,
+                CURLOPT_SSL_VERIFYPEER => false,
+            ]);
+
+            $response_raw = curl_exec($ch);
+            $http_code    = curl_getinfo($ch, CURLINFO_HTTP_CODE);
+            $curl_error   = curl_error($ch);
+            curl_close($ch);
+
+            if (!$curl_error && $http_code === 200) {
+                $modelo_usado = $modelo;
+                $sucesso      = true;
+                break 2; // sai do loop de tentativas E do loop de modelos
+            }
+
+            // Se não é erro transitório, não adianta tentar de novo nem trocar de modelo
+            if (!$eh_erro_transitorio($http_code, (string)$response_raw)) break;
+
+            // Pequena pausa antes de tentar novamente no mesmo modelo
+            if ($t < 2) sleep(2);
+        }
+
+        // Se chegou aqui, esse modelo falhou — tenta o próximo sem pausa extra
+    }
+
+    if ($curl_error) {
+        resp(500, ['success' => false, 'error' => 'Erro de conexão com Gemini: ' . $curl_error]);
+    }
+
+    if (!$sucesso) {
+        $detalhe = json_decode((string)$response_raw, true);
+        $msg = $detalhe['error']['message'] ?? 'Erro HTTP ' . $http_code;
+        resp(500, ['success' => false, 'error' => 'Todos os modelos de IA estão indisponíveis no momento. Tente novamente em alguns instantes. (Detalhe: ' . mb_substr($msg, 0, 120) . ')']);
+    }
+
+    $response_data = json_decode($response_raw, true);
+    $texto_gemini  = $response_data['candidates'][0]['content']['parts'][0]['text'] ?? null;
+
+    if (!$texto_gemini) {
+        resp(500, ['success' => false, 'error' => 'Resposta vazia do Gemini.']);
+    }
+
+    // O Gemini 2.5 retorna texto de pensamento antes do JSON em alguns casos.
+    // Tenta varios metodos de extracao em ordem.
+    $texto_limpo = trim($texto_gemini);
+
+    // 1) Remove blocos markdown ```json ... ```
+    $sem_md = preg_replace('/```(?:json)?\s*([\s\S]*?)```/i', '$1', $texto_limpo);
+    $sem_md = trim($sem_md !== null ? $sem_md : $texto_limpo);
+
+    // 2) Tenta decodificar apos remover markdown
+    $resultado = json_decode($sem_md, true);
+
+    // 3) Se ainda falhou, extrai o primeiro { ... } do texto bruto
+    if (json_last_error() !== JSON_ERROR_NONE) {
+        if (preg_match('/\{[\s\S]*\}/u', $texto_limpo, $matches)) {
+            $resultado = json_decode($matches[0], true);
+        }
+    }
+
+    if (json_last_error() !== JSON_ERROR_NONE || !is_array($resultado)) {
+        resp(500, ['success' => false, 'error' => 'Resposta invalida. Recebido: ' . mb_substr($texto_gemini, 0, 400)]);
+    }
+
+    resp(200, ['success' => true, 'dados' => $resultado, 'modelo' => $modelo_usado]);
+}
+
 
 ;

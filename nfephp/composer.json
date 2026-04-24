@@ -1,0 +1,14 @@
+{
+    "name": "consertaos/nfce",
+    "require": {
+        "php": ">=8.0",
+        "nfephp-org/sped-nfe":    "^5.1",
+        "nfephp-org/sped-da":     "^1.1",
+        "nfephp-org/sped-common": "^5.1"
+    },
+    "config": {
+        "vendor-dir": "vendor"
+    },
+    "minimum-stability": "stable",
+    "prefer-stable": true
+}
