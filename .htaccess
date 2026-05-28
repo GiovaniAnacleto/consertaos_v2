@@ -1,0 +1,57 @@
+# =============================================================
+# _master/.htaccess — Proteções de segurança da instalação master
+# =============================================================
+
+# ── Desabilita listagem de diretórios ─────────────────────────
+Options -Indexes
+
+# ── Bloqueia extensões sensíveis ──────────────────────────────
+# .pem/.pfx/.p12/.key — certificados e chaves privadas
+# .db3/.db/.sqlite     — bancos de dados SQLite
+# .log/.lock           — logs e arquivos de lock
+<FilesMatch "\.(pem|pfx|p12|key|db3|db|sqlite|log|lock)$">
+    Order Deny,Allow
+    Deny from all
+</FilesMatch>
+
+# ── Bloqueia arquivos PHP sensíveis ───────────────────────────
+# config.php      — credenciais SMTP e chave de provisionamento
+# provisionar.php — cria novos tenants (só deve ser chamado pela landing)
+# backup_api.php  — acesso aos bancos de todos os clientes
+# diag_*.php      — arquivos de diagnóstico temporários (apague-os do servidor)
+<FilesMatch "^(config|provisionar|backup_api|diag_cancelamento|diag_loja)\.php$">
+    Order Deny,Allow
+    Deny from all
+</FilesMatch>
+
+# ── Bloqueia acesso direto a diretórios internos ──────────────
+# logs/    — contém reset_senha.log, first_run.log (dados sensíveis)
+# src/     — classes PHP internas, não devem ser acessíveis via web
+# backups/ — tem .htaccess próprio, esta regra é defesa em profundidade
+<IfModule mod_rewrite.c>
+    RewriteEngine On
+    RewriteRule ^(logs|src|backups|nfephp|vendor)/  - [F,L]
+</IfModule>
+
+# ── Fallback sem mod_rewrite: FilesMatch em nível de diretório ─
+# (Locaweb com AllowOverride limitado)
+<FilesMatch "^(logs|src|backups)/">
+    Order Deny,Allow
+    Deny from all
+</FilesMatch>
+
+# ── Cabeçalhos de segurança HTTP ──────────────────────────────
+<IfModule mod_headers.c>
+    # Impede que o browser infira o tipo MIME incorretamente
+    Header always set X-Content-Type-Options "nosniff"
+    # Impede que a aplicação seja embarcada em iframes externos
+    Header always set X-Frame-Options "SAMEORIGIN"
+    # Remove informações de versão do servidor dos cabeçalhos de resposta
+    Header unset X-Powered-By
+    Header unset Server
+</IfModule>
+
+# ── Compressão de respostas (performance) ─────────────────────
+<IfModule mod_deflate.c>
+    AddOutputFilterByType DEFLATE application/json text/html text/javascript application/javascript
+</IfModule>

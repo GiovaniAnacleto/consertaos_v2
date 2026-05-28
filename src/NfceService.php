@@ -161,12 +161,22 @@ class NfceService
         $make->tagenderEmit($enderEmit);
 
         // tagdest + tagenderDest — destinatário (opcional)
-        $cpfDest = preg_replace('/\D/', '', $dados['cliente_cpf'] ?? '');
-        if (strlen($cpfDest) === 11) {
+        $docDest = preg_replace('/\D/', '', $dados['cliente_cpf'] ?? '');
+        $docLen  = strlen($docDest);
+        // Fallback: openNfceModal envia CNPJ em 'cliente_cnpj' (campo separado)
+        if ($docLen !== 11 && $docLen !== 14) {
+            $docDest = preg_replace('/\D/', '', $dados['cliente_cnpj'] ?? '');
+            $docLen  = strlen($docDest);
+        }
+        if ($docLen === 11 || $docLen === 14) {
             $dest = new \stdClass();
-            $dest->xNome     = mb_strtoupper(substr($dados['cliente_nome'] ?? 'CONSUMIDOR', 0, 60));
-            $dest->CPF       = $cpfDest;
+            $dest->xNome     = mb_strtoupper(substr(trim($dados['cliente_nome'] ?? '') ?: 'CONSUMIDOR', 0, 60));
             $dest->indIEDest = 9; // não contribuinte
+            if ($docLen === 11) {
+                $dest->CPF  = $docDest;
+            } else {
+                $dest->CNPJ = $docDest;
+            }
             $make->tagdest($dest);
         }
 
@@ -181,11 +191,15 @@ class NfceService
             $ncm   = preg_replace('/\D/', '', $it['ncm'] ?? '00000000');
             $ncm   = str_pad($ncm, 8, '0', STR_PAD_LEFT);
 
+            // EAN: usa codigo_barras do produto se for GTIN válido (8/12/13/14 dígitos)
+            $eanRaw  = preg_replace('/\D/', '', $it['ean'] ?? '');
+            $eanVal  = in_array(strlen($eanRaw), [8, 12, 13, 14]) ? $eanRaw : 'SEM GTIN';
+
             // tagprod
             $prod = new \stdClass();
             $prod->item         = $nItem;
             $prod->cProd        = substr(preg_replace('/[^a-zA-Z0-9\-]/', '', $it['codigo'] ?? str_pad((string)$nItem, 3, '0', STR_PAD_LEFT)), 0, 60);
-            $prod->cEAN         = 'SEM GTIN';
+            $prod->cEAN         = $eanVal;
             $prod->xProd        = mb_strtoupper(substr(trim($it['descricao'] ?? 'PRODUTO'), 0, 120));
             $prod->NCM          = $ncm;
             $prod->CFOP         = (string)($it['cfop'] ?? '5102');
@@ -193,7 +207,7 @@ class NfceService
             $prod->qCom         = $qtd;
             $prod->vUnCom       = $vUnit;
             $prod->vProd        = $vTot;  // valor bruto (qtd × vUnit)
-            $prod->cEANTrib     = 'SEM GTIN';
+            $prod->cEANTrib     = $eanVal;
             $prod->uTrib        = strtoupper($it['unidade'] ?? 'UN');
             $prod->qTrib        = $qtd;
             $prod->vUnTrib      = $vUnit;
@@ -205,9 +219,10 @@ class NfceService
             $prod->indTot       = 1;
             $make->tagprod($prod);
 
-            // tagimposto
+            // tagimposto — vTotTrib = estimativa de tributos (0 quando não disponível)
             $imp = new \stdClass();
-            $imp->item = $nItem;
+            $imp->item      = $nItem;
+            $imp->vTotTrib  = round((float)($it['vTotTrib'] ?? 0), 2);
             $make->tagimposto($imp);
 
             // tagICMSSN — Simples Nacional
@@ -311,32 +326,36 @@ class NfceService
         $make->tagtransp($transp);
 
         // tagpag — container (deve vir antes dos tagdetPag na v5)
+        // vTroco omitido (0.00 causa rejeição na SEFAZ SC — só incluir quando > 0)
         $pagContainer = new \stdClass();
-        $pagContainer->vTroco = 0.00;
         $make->tagpag($pagContainer);
 
         // tagdetPag — formas de pagamento (dentro do tagpag)
         // Para cartão de crédito (03) e débito (04) a SEFAZ exige a sub-tag <card>
         // com os dados da operadora. Sem ela o retorno é:
         // "Rejeicao: Nao informados os dados do cartao de credito/debito nas Formas de Pagamento"
+        // indPag removido: campo descontinuado no schema NFe 4.00 atual — inclui-lo
+        // faz a SEFAZ SC rejeitar qualquer forma de pagamento diferente de dinheiro.
         $formasPag = $dados['formas_pagamento'] ?? [['tipo' => '01', 'valor' => $valorTotal]];
         foreach ($formasPag as $fp) {
             $pag = new \stdClass();
-            $pag->indPag = 0; // 0=à vista, 1=a prazo
             $pag->tPag   = str_pad((string)($fp['tipo'] ?? '01'), 2, '0', STR_PAD_LEFT);
             $pag->vPag   = round((float)($fp['valor'] ?? $valorTotal), 2);
 
             // ── Dados do cartão (obrigatório quando tPag = 03 ou 04) ────────
-            // tpIntegra: 1 = Integrado com TEF/POS (usa CNPJ da credenciadora)
-            //            2 = Não integrado (operação manual, CNPJ pode ser zeros)
+            // tpIntegra: 1 = Integrado com TEF/POS → CNPJ, tBand e cAut obrigatórios
+            //            2 = Não integrado (operação manual) → CNPJ omitido (SEFAZ rejeita zeros)
             // tBand:     01=Visa 02=Mastercard 03=AmericanExpress 04=Sorocred
             //            05=DinersClub 06=Elo 07=Hipercard 08=Aura 09=Cabal 99=Outros
             // cAut:      código de autorização retornado pelo POS/TEF
             if (in_array($pag->tPag, ['03', '04'])) {
-                $pag->tpIntegra = (int)($fp['card_tp_integra'] ?? 2); // 2=não integrado (padrão seguro)
-                $pag->CNPJ      = preg_replace('/\D/', '', $fp['card_cnpj'] ?? '00000000000000');
+                $pag->tpIntegra = (int)($fp['card_tp_integra'] ?? 2);
                 $pag->tBand     = str_pad((string)($fp['card_tband'] ?? '99'), 2, '0', STR_PAD_LEFT);
-                $pag->cAut      = $fp['card_caut'] ?? '000000'; // código de autorização (mín. 1 char)
+                $pag->cAut      = $fp['card_caut'] ?? '000000';
+                // CNPJ da credenciadora: obrigatório apenas em tpIntegra=1 (integrado com TEF)
+                if ($pag->tpIntegra === 1) {
+                    $pag->CNPJ = preg_replace('/\D/', '', $fp['card_cnpj'] ?? '');
+                }
             }
 
             $make->tagdetPag($pag);
@@ -344,7 +363,8 @@ class NfceService
 
         // taginfAdic — informações adicionais (obrigatório para NFC-e)
         $infAdic = new \stdClass();
-        $infAdic->infCpl = 'Emitido por ConsertaOS';
+        $obsUsuario = trim($dados['inf_cpl'] ?? '');
+        $infAdic->infCpl = $obsUsuario ? $obsUsuario . ' | Emitido por ConsertaOS' : 'Emitido por ConsertaOS';
         $make->taginfAdic($infAdic);
 
         // taginfRespTec — responsável técnico pelo software (obrigatório desde 2020)
@@ -366,6 +386,13 @@ class NfceService
 
         // ── Gera XML, assina e transmite ───────────────────────────────
         $xml = $make->getXML();
+
+        // Garante <card> em detPag para cartão de crédito/débito.
+        // Algumas versões do sped-nfe não incluem <card> a partir das propriedades
+        // do stdClass (equilizeParameters não lista tpIntegra/tBand/cAut), por isso
+        // fazemos a injeção diretamente no XML antes de assinar.
+        $xml = $this->_injectCardElements($xml, $formasPag);
+        $xml = $this->_injectVTotTrib($xml);
 
         $configTools = $this->_buildToolsConfig();
         $certificate = Certificate::readPfx(
@@ -480,32 +507,214 @@ class NfceService
     // ──────────────────────────────────────────────────────────────────
     public function cancelar(string $chave, string $justificativa, string $nProt): array
     {
+        if (strlen($chave) !== 44) {
+            throw new \InvalidArgumentException("Chave de acesso inválida (deve ter 44 dígitos): '$chave'");
+        }
+        if (!$nProt) {
+            throw new \InvalidArgumentException('Número de protocolo (nProt) não encontrado. A NFC-e pode não ter sido autorizada corretamente.');
+        }
+
         $configTools = $this->_buildToolsConfig();
         $certificate = Certificate::readPfx(
             base64_decode($this->config['certificado_pfx']),
             $this->config['certificado_senha']
         );
         $tools = new Tools(json_encode($configTools), $certificate);
-        $tools->model('65');
+        $tools->model('65'); // NFC-e
 
-        $resp = $tools->sefazCancela($chave, $justificativa, $nProt);
+        $logDir = $this->config['storage_dir'] . '/logs';
+        if (!is_dir($logDir)) mkdir($logDir, 0755, true);
 
-        $st = new \NFePHP\NFe\Common\Standardize();
-        $obj = $st->toStd($resp);
+        try {
+            $resp = $tools->sefazCancela($chave, $justificativa, $nProt);
+        } catch (\Throwable $e) {
+            $errMsg = $e->getMessage();
+            file_put_contents("$logDir/cancelamento_erro_" . date('YmdHis') . ".txt", $errMsg);
+            return [
+                'autorizada' => false,
+                'cStat'      => 'EXCECAO',
+                'xMotivo'    => 'Erro ao comunicar com a SEFAZ: ' . $errMsg,
+                'nProt'      => '',
+            ];
+        }
 
-        $autorizada = isset($obj->retEvento->infEvento->cStat) &&
-                      in_array((string)$obj->retEvento->infEvento->cStat, ['135', '155']);
+        // Captura erros internos do NFePHP (SOAP/cURL silenciosos)
+        $internalErrors = '';
+        if (!empty($tools->errors)) {
+            $internalErrors = implode(' | ', array_map(
+                fn($e) => is_array($e) ? json_encode($e) : (string)$e,
+                $tools->errors
+            ));
+        }
+
+        // Se resp veio vazio, tenta recuperar lastResponse do Tools
+        if (empty($resp) && property_exists($tools, 'lastResponse')) {
+            $resp = (string)$tools->lastResponse;
+        }
+
+        // Loga tudo para diagnóstico
+        $logContent = "=== RESP ===\n" . (string)$resp
+                    . "\n=== ERRORS ===\n" . $internalErrors;
+        file_put_contents("$logDir/cancelamento_" . date('YmdHis') . ".txt", $logContent);
+
+        // sefazCancela retorna o envelope SOAP completo nesta versão do NFePHP.
+        // É preciso extrair o retEnvEvento de dentro de soap:Body > nfeResultMsg.
+        $cStat   = '';
+        $xMotivo = '';
+        $nProt   = '';
+
+        if (!empty($resp)) {
+            // Tenta via SimpleXML com local-name() para ignorar namespaces SOAP
+            $xmlSoap = @simplexml_load_string($resp);
+            if ($xmlSoap) {
+                $nodes = $xmlSoap->xpath('//*[local-name()="infEvento"]');
+                if (!empty($nodes)) {
+                    $cStat   = (string)($nodes[0]->cStat   ?? '');
+                    $xMotivo = (string)($nodes[0]->xMotivo ?? '');
+                    $nProt   = (string)($nodes[0]->nProt   ?? '');
+                }
+            }
+
+            // Fallback: Standardize sobre o XML limpo (sem envelope SOAP)
+            if (!$cStat) {
+                $st  = new \NFePHP\NFe\Common\Standardize();
+                $obj = $st->toStd($resp);
+                $inf = $obj->retEnvEvento->retEvento->infEvento
+                    ?? $obj->retEvento->infEvento
+                    ?? null;
+                $cStat   = (string)($inf->cStat   ?? '');
+                $xMotivo = (string)($inf->xMotivo ?? '');
+                $nProt   = (string)($inf->nProt   ?? '');
+            }
+        }
+
+        // 135 = cancelado; 155 = fora do prazo mas aceito; 136 = evento duplicado (já cancelado)
+        $autorizada = in_array($cStat, ['135', '155', '136']);
+
+        if (!$xMotivo && !$autorizada) {
+            $xMotivo = $internalErrors
+                ? "Erro interno NFePHP: $internalErrors"
+                : "Sem retorno da SEFAZ [cStat=$cStat] | Resp: " . substr((string)$resp, 0, 300);
+        }
 
         return [
             'autorizada' => $autorizada,
-            'xMotivo'    => (string)($obj->retEvento->infEvento->xMotivo ?? 'Sem retorno'),
-            'nProt'      => (string)($obj->retEvento->infEvento->nProt   ?? ''),
+            'cStat'      => $cStat,
+            'xMotivo'    => $xMotivo,
+            'nProt'      => $nProt,
         ];
     }
 
     // ──────────────────────────────────────────────────────────────────
     // PRIVADOS
     // ──────────────────────────────────────────────────────────────────
+    /**
+     * Injeta <card> em cada <detPag> de cartão que esteja sem o elemento.
+     *
+     * Opera por substituição direta na string XML (sem DOMDocument) para não
+     * introduzir declarações de namespace extras que invalidam a assinatura.
+     *
+     * A SEFAZ SC exige <card> para qualquer pagamento eletrônico, não apenas
+     * tPag 03/04 (cartão). PIX (17), boleto (15), transferência (18), etc.
+     * também precisam de <card> com defaults de "não integrado".
+     * Exceções: 01 (dinheiro) e 90 (sem pagamento) — esses nunca levam <card>.
+     * Defaults: tpIntegra=2 (não integrado), tBand=99, cAut=000000.
+     */
+    private function _injectCardElements(string $xml, array $formasPag): string
+    {
+        // tPag que NUNCA precisam de <card>
+        $semCard = ['01', '90'];
+
+        // Dados de cartão fornecidos pelo frontend (só para tPag 03/04)
+        $cardsData = [];
+        foreach ($formasPag as $fp) {
+            $tPag = str_pad((string)($fp['tipo'] ?? '01'), 2, '0', STR_PAD_LEFT);
+            if (in_array($tPag, ['03', '04'])) {
+                $cardsData[] = [
+                    'tpIntegra' => (int)($fp['card_tp_integra'] ?? 2),
+                    'tBand'     => str_pad((string)($fp['card_tband'] ?? '99'), 2, '0', STR_PAD_LEFT),
+                    'cAut'      => $fp['card_caut'] ?? '000000',
+                ];
+            }
+        }
+
+        $cardIdx = 0;
+
+        $result = preg_replace_callback(
+            '/<detPag>(.*?)<\/detPag>/s',
+            function (array $m) use ($semCard, $cardsData, &$cardIdx): string {
+                $inner = $m[1];
+
+                // Extrai o tPag do bloco
+                if (!preg_match('/<tPag>(\d+)<\/tPag>/', $inner, $tm)) {
+                    return $m[0];
+                }
+                $tPag = str_pad($tm[1], 2, '0', STR_PAD_LEFT);
+
+                // Dinheiro e sem-pagamento: sem <card>
+                if (in_array($tPag, $semCard)) {
+                    return $m[0];
+                }
+
+                // Já tem <card>: nada a fazer
+                if (strpos($inner, '<card>') !== false) {
+                    return $m[0];
+                }
+
+                // Cartão crédito/débito usa dados do frontend; demais usam defaults
+                $cf = $cardsData[$cardIdx] ?? [
+                    'tpIntegra' => 2,
+                    'tBand'     => '99',
+                    'cAut'      => '000000',
+                ];
+                if (in_array($tPag, ['03', '04'])) {
+                    $cardIdx++;
+                }
+
+                $card = '<card>'
+                    . '<tpIntegra>' . (int)$cf['tpIntegra']        . '</tpIntegra>'
+                    . '<tBand>'     . htmlspecialchars((string)$cf['tBand'], ENT_XML1) . '</tBand>'
+                    . '<cAut>'      . htmlspecialchars((string)$cf['cAut'],  ENT_XML1) . '</cAut>'
+                    . '</card>';
+
+                return '<detPag>' . $inner . $card . '</detPag>';
+            },
+            $xml
+        );
+
+        return $result ?? $xml;
+    }
+
+    /**
+     * Garante <vTotTrib> no XML quando o NFePHP omite o campo (valor zero).
+     * — No <ICMSTot>: injeta antes de </ICMSTot>
+     * — Por item em <imposto>: injeta como primeiro filho, antes de <ICMS>
+     */
+    private function _injectVTotTrib(string $xml): string
+    {
+        // <vTotTrib> em <ICMSTot>
+        $xml = preg_replace_callback(
+            '/<ICMSTot>(.*?)<\/ICMSTot>/s',
+            function (array $m): string {
+                if (strpos($m[1], '<vTotTrib>') !== false) return $m[0];
+                return '<ICMSTot>' . $m[1] . '<vTotTrib>0.00</vTotTrib></ICMSTot>';
+            },
+            $xml
+        ) ?? $xml;
+
+        // <vTotTrib> por item em <imposto> (deve ser o primeiro filho)
+        $xml = preg_replace_callback(
+            '/<imposto>(.*?)<\/imposto>/s',
+            function (array $m): string {
+                if (strpos($m[1], '<vTotTrib>') !== false) return $m[0];
+                return '<imposto><vTotTrib>0.00</vTotTrib>' . $m[1] . '</imposto>';
+            },
+            $xml
+        ) ?? $xml;
+
+        return $xml;
+    }
+
     private function _buildToolsConfig(): array
     {
         $empresa = $this->config['empresa'];

@@ -6,6 +6,15 @@ $id = isset($_GET['id']) ? (int)$_GET['id'] : 0;
 $api_base = ((!empty($_SERVER['HTTPS']) && $_SERVER['HTTPS'] !== 'off') ? 'https' : 'http')
           . '://' . $_SERVER['HTTP_HOST']
           . rtrim(dirname($_SERVER['SCRIPT_NAME']), '/') . '/api.php';
+
+// ── Cabeçalhos de segurança ─────────────────────────────────────────────────
+// Content-Security-Policy: bloqueia XSS inline e carregamento de recursos externos.
+// 'nonce-...' permite o bloco <script> desta página sem abrir para scripts injetados.
+$csp_nonce = base64_encode(random_bytes(16));
+header("Content-Security-Policy: default-src 'self'; script-src 'nonce-{$csp_nonce}'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self'; frame-ancestors 'none'");
+header('X-Content-Type-Options: nosniff');
+header('X-Frame-Options: DENY');
+header('Referrer-Policy: strict-origin-when-cross-origin');
 ?>
 <!DOCTYPE html>
 <html lang="pt-BR">
@@ -44,6 +53,14 @@ $api_base = ((!empty($_SERVER['HTTPS']) && $_SERVER['HTTPS'] !== 'off') ? 'https
     .spinner{width:36px;height:36px;border:4px solid #e8711a33;border-top-color:#e8711a;border-radius:50%;animation:spin .7s linear infinite;margin:0 auto 14px}
     @keyframes spin{to{transform:rotate(360deg)}}
     .not-found{text-align:center;padding:40px 20px;color:#666}
+    .lgpd-footer{max-width:520px;margin:14px auto 0;text-align:center;font-size:11px;color:#888}
+    .lgpd-footer a{color:#1a3a5c;text-decoration:none;font-weight:600}
+    .lgpd-banner{position:fixed;left:0;right:0;bottom:0;background:#1a3a5c;color:#fff;padding:14px 18px;box-shadow:0 -4px 16px rgba(0,0,0,.18);z-index:9999;display:flex;gap:12px;align-items:center;justify-content:center;flex-wrap:wrap}
+    .lgpd-banner p{font-size:13px;line-height:1.4;max-width:680px}
+    .lgpd-banner a{color:#ffd28a;text-decoration:underline}
+    .lgpd-banner button{background:#e8711a;color:#fff;border:0;border-radius:6px;padding:8px 16px;font-size:13px;font-weight:700;cursor:pointer}
+    .lgpd-banner button:hover{background:#d3640f}
+    .lgpd-banner .btn-recusar{background:transparent;border:1px solid #ffffff66;margin-left:8px}
   </style>
 </head>
 <body>
@@ -63,9 +80,24 @@ $api_base = ((!empty($_SERVER['HTTPS']) && $_SERVER['HTTPS'] !== 'off') ? 'https
     </div>
   </div>
 
-  <script>
+  <script nonce="<?= $csp_nonce ?>">
   const OS_ID = <?= $id ?>;
   const API   = <?= json_encode($api_base) ?>;
+
+  /**
+   * esc() — escapa HTML para evitar XSS ao inserir dados do banco via innerHTML.
+   * Deve ser usada em TODOS os campos de dados não confiáveis interpolados em strings
+   * de template que são atribuídas a .innerHTML.
+   */
+  function esc(s) {
+    if (s === null || s === undefined) return '';
+    return String(s)
+      .replace(/&/g, '&amp;')
+      .replace(/</g, '&lt;')
+      .replace(/>/g, '&gt;')
+      .replace(/"/g, '&quot;')
+      .replace(/'/g, '&#x27;');
+  }
 
   function statusClass(s) {
     s = (s||'').toLowerCase();
@@ -114,11 +146,13 @@ $api_base = ((!empty($_SERVER['HTTPS']) && $_SERVER['HTTPS'] !== 'off') ? 'https
   function render(os) {
     const orcs = os.orcamentos || [];
     const totalOrc = orcs.reduce((s,o) => s + (+o.valor||0), 0);
+
+    // Todos os campos do banco passam por esc() antes de entrar em innerHTML
     const obsHtml = os.observacoes?.length
       ? os.observacoes.map(o => `
           <li class="obs-item">
-            ${o.observacao}
-            <time>${fmt(o.data_criacao)}</time>
+            ${esc(o.observacao)}
+            <time>${esc(fmt(o.data_criacao))}</time>
           </li>`).join('')
       : '<li style="color:#aaa;font-size:13px;padding:8px 0">Nenhuma observação registrada.</li>';
 
@@ -126,7 +160,7 @@ $api_base = ((!empty($_SERVER['HTTPS']) && $_SERVER['HTTPS'] !== 'off') ? 'https
       ? `<div class="section-title">Orçamento</div>
          ${orcs.map(o => `
            <div style="display:flex;justify-content:space-between;align-items:center;padding:8px 0;border-bottom:1px solid #f0f0f0;font-size:13px">
-             <span style="color:#444">${o.observacoes||'—'}</span>
+             <span style="color:#444">${esc(o.observacoes)||'—'}</span>
              <span style="font-weight:700;color:#1a3a5c">R$ ${(+o.valor).toFixed(2)}</span>
            </div>`).join('')}
          <div style="text-align:right;font-weight:700;font-size:14px;padding-top:8px;color:#e8711a">
@@ -134,44 +168,49 @@ $api_base = ((!empty($_SERVER['HTTPS']) && $_SERVER['HTTPS'] !== 'off') ? 'https
          </div>`
       : '';
 
+    // statusClass/statusIcon usam apenas comparações internas — sem risco de XSS.
+    // O valor exibível do status, porém, passa por esc() para segurança.
+    const statusEscapado = esc(os.status) || '—';
+    const marcaModelo = [os.marca_nome, os.modelo_nome].filter(Boolean).map(esc).join(' / ') || '—';
+
     document.getElementById('card').innerHTML = `
       <div class="card-header">
-        <h1>Ordem de Serviço #${os.id}</h1>
+        <h1>Ordem de Serviço #${Number(os.id)}</h1>
         <p>Acompanhe o status do seu aparelho</p>
       </div>
       <div class="card-body">
         <div class="status-badge ${statusClass(os.status)}">
-          ${statusIcon(os.status)} ${os.status || '—'}
+          ${statusIcon(os.status)} ${statusEscapado}
         </div>
 
         <div style="display:grid;grid-template-columns:1fr 1fr;gap:0">
           <div class="field">
             <label>Cliente</label>
-            <span>${os.cliente_nome||'—'}</span>
+            <span>${esc(os.cliente_nome)||'—'}</span>
           </div>
           <div class="field">
             <label>Data de Abertura</label>
-            <span>${fmt(os.data_abertura)}</span>
+            <span>${esc(fmt(os.data_abertura))}</span>
           </div>
           <div class="field">
             <label>Aparelho</label>
-            <span>${os.tipo_nome||'—'}</span>
+            <span>${esc(os.tipo_nome)||'—'}</span>
           </div>
           <div class="field">
             <label>Marca / Modelo</label>
-            <span>${[os.marca_nome,os.modelo_nome].filter(Boolean).join(' / ')||'—'}</span>
+            <span>${marcaModelo}</span>
           </div>
           ${os.previsao_conclusao ? `
           <div class="field">
             <label>Previsão de Conclusão</label>
-            <span>${os.previsao_conclusao}</span>
+            <span>${esc(os.previsao_conclusao)}</span>
           </div>` : ''}
         </div>
 
         <div class="divider"></div>
         <div class="field">
           <label>Defeito Informado</label>
-          <span>${os.descricao||'—'}</span>
+          <span>${esc(os.descricao)||'—'}</span>
         </div>
 
         ${orcHtml ? `<div class="divider"></div>${orcHtml}` : ''}
@@ -190,5 +229,59 @@ $api_base = ((!empty($_SERVER['HTTPS']) && $_SERVER['HTTPS'] !== 'off') ? 'https
   load();
   </script>
 <?php endif; ?>
+
+<div class="lgpd-footer">
+  <a href="politica.php" target="_blank" rel="noopener">Política de Privacidade</a>
+</div>
+
+<div class="lgpd-banner" id="lgpd-banner" style="display:none">
+  <p>Esta página exibe dados pessoais relacionados à sua ordem de serviço. Ao continuar, você reconhece a <a href="politica.php" target="_blank" rel="noopener">Política de Privacidade</a> e o tratamento dos seus dados nos termos da LGPD.</p>
+  <div>
+    <button type="button" id="lgpd-aceitar">Entendi</button>
+    <button type="button" class="btn-recusar" id="lgpd-recusar">Recusar</button>
+  </div>
+</div>
+
+<script nonce="<?= $csp_nonce ?>">
+(function(){
+  const KEY = 'lgpd_consulta_aceite';
+  const API = <?= json_encode($api_base) ?>;
+  const OS  = <?= (int)$id ?>;
+  const banner = document.getElementById('lgpd-banner');
+  if (!banner) return;
+  try {
+    if (!localStorage.getItem(KEY)) banner.style.display = 'flex';
+  } catch(e) { banner.style.display = 'flex'; }
+  document.getElementById('lgpd-aceitar')?.addEventListener('click', function(){
+    try { localStorage.setItem(KEY, '1'); } catch(e) {}
+    banner.style.display = 'none';
+    fetch(API + '?resource=lgpd&action=consentimento', {
+      method: 'POST',
+      headers: {'Content-Type':'application/json'},
+      body: JSON.stringify({
+        identificador: 'OS#' + OS,
+        finalidade: 'consulta_publica',
+        origem: 'consulta_publica',
+        aceito: 1
+      })
+    }).catch(()=>{});
+  });
+  document.getElementById('lgpd-recusar')?.addEventListener('click', function(){
+    // Recusar bloqueia a exibição dos dados nesta sessão
+    document.getElementById('card').innerHTML = '<div class="card-body not-found"><p style="font-size:40px;margin-bottom:12px">🔒</p><p style="font-weight:700;font-size:16px;margin-bottom:6px">Consulta encerrada</p><p style="font-size:13px;color:#aaa">Para visualizar os dados desta OS, é necessário aceitar o tratamento dos dados pessoais conforme nossa Política de Privacidade.</p></div>';
+    banner.style.display = 'none';
+    fetch(API + '?resource=lgpd&action=consentimento', {
+      method: 'POST',
+      headers: {'Content-Type':'application/json'},
+      body: JSON.stringify({
+        identificador: 'OS#' + OS,
+        finalidade: 'consulta_publica',
+        origem: 'consulta_publica',
+        aceito: 0
+      })
+    }).catch(()=>{});
+  });
+})();
+</script>
 </body>
 </html>

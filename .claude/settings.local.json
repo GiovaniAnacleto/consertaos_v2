@@ -1,0 +1,31 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(cmd /c \"dir /b \\\\\"c:\\\\Users\\\\User\\\\OneDrive\\\\1projetos_software\\\\consertaos_v2\\\\nfephp\\\\vendor\\\\\" 2>&1\")",
+      "Bash(grep -n 'if \\($resource === '\\\\''nfce'\\\\''\\)' /c/Users/User/OneDrive/1projetos_software/consertaos_v2/api.php)",
+      "Bash(grep -n '$_POST\\\\|route\\\\|action\\\\|method' /c/Users/User/OneDrive/1projetos_software/consertaos_v2/api.php)",
+      "Bash(grep -n '^$resource\\\\|^if.*resource.*===\\\\|^// ──' c:/Users/giova/OneDrive/1projetos_software/consertaos_v2/api.php)",
+      "Bash(php -l \"c:/Users/User/OneDrive/1projetos_software/consertaos_v2/api.php\")",
+      "PowerShell(php -l \"c:\\\\Users\\\\User\\\\OneDrive\\\\1projetos_software\\\\consertaos_v2\\\\api.php\" 2>&1)",
+      "Bash(Select-String -Path \"c:\\\\Users\\\\User\\\\OneDrive\\\\1projetos_software\\\\consertaos_v2\\\\index.html\" -Pattern \"page=.vendas_nfce|renderNfceList|nfceListSelecionados|imprimir.*nfce\")",
+      "Bash(Select-Object -First 50)",
+      "Bash(Get-ChildItem -Path \"c:\\\\Users\\\\User\\\\OneDrive\\\\1projetos_software\\\\consertaos_v2\" -Recurse -Directory)",
+      "Bash(Select-Object -ExpandProperty FullName)",
+      "PowerShell(Get-ChildItem -Path \"c:\\\\Users\\\\User\\\\OneDrive\\\\1projetos_software\\\\consertaos_v2\" -Recurse -Directory | Select-Object -First 20 | ForEach-Object { $_.FullName })",
+      "PowerShell(Get-ChildItem -Path \"c:\\\\Users\\\\User\\\\OneDrive\\\\1projetos_software\\\\consertaos_v2\\\\src\" -Recurse -File | Select-Object -First 50 | ForEach-Object { $_.FullName })",
+      "PowerShell(Get-ChildItem -Path \"c:\\\\Users\\\\User\\\\OneDrive\\\\1projetos_software\\\\consertaos_v2\" -Recurse -File | Select-Object @{Name=\"Name\";Expression={$_.Name}}, @{Name=\"Extension\";Expression={$_.Extension}} | Group-Object Extension | ForEach-Object { \"$\\($_.Name\\): $\\($_.Count\\)\" } | Sort-Object)",
+      "Bash(Get-ChildItem -Path \"c:\\\\Users\\\\giova\\\\OneDrive\\\\1projetos_software\\\\consertaos_v2\" -Recurse -Include \"index.html\", \"api.php\")",
+      "Bash(Select-Object FullName)",
+      "Bash(grep -n '\\($resource === '\\\\''funcionarios'\\\\''' c:/Users/giova/OneDrive/1projetos_software/consertaos_v2/api.php)",
+      "Bash(php -v)",
+      "Bash(where php *)",
+      "Bash(powershell -Command \"where.exe php 2>&1\")",
+      "Bash(Get-ChildItem -Recurse -Include *.html, *.php)",
+      "Bash(Select-Object -First 30)",
+      "Bash(grep -n 'json_decode\\\\|$data\\\\s*=' c:/Users/giova/OneDrive/1projetos_software/consertaos_v2/api.php)",
+      "Bash(Get-ChildItem -Path \"c:\\\\Users\\\\giova\\\\OneDrive\\\\1projetos_software\\\\consertaos_v2\" -Recurse -Filter \"api.php\")",
+      "Bash(php -r ' *)",
+      "Bash(dir /B)"
+    ]
+  }
+}

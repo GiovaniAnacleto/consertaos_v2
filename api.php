@@ -20,22 +20,48 @@ set_error_handler(function($errno, $errstr, $errfile, $errline) {
 ini_set('session.use_strict_mode', 1);
 ini_set('session.cookie_httponly', 1);
 ini_set('session.cookie_samesite', 'Lax');
+// LGPD: marcar cookie como Secure quando estiver em HTTPS
+if (!empty($_SERVER['HTTPS']) && $_SERVER['HTTPS'] !== 'off') {
+    ini_set('session.cookie_secure', 1);
+}
 session_start();
 
+// ─── LGPD: cabeçalhos de segurança ────────────────────────────────
+header('X-Content-Type-Options: nosniff');
+header('X-Frame-Options: SAMEORIGIN');
+header('Referrer-Policy: strict-origin-when-cross-origin');
+header('Permissions-Policy: geolocation=(), microphone=(), camera=()');
+
 // ─── CONFIG (chaves de API e configurações sensíveis) ─────────
-if (file_exists(__DIR__ . '/config.php')) {
-    require_once __DIR__ . '/config.php';
+// SAAS_DIR: diretório de dados do cliente (uploads, storage, DB, config).
+// Quando api.php é incluído via thin wrapper de um subfolder de cliente,
+// SAAS_DIR é definido pelo wrapper apontando para a pasta do cliente.
+// Quando rodado diretamente, usa o próprio diretório.
+if (!defined('SAAS_DIR')) define('SAAS_DIR', __DIR__);
+if (file_exists(SAAS_DIR . '/config.php')) {
+    require_once SAAS_DIR . '/config.php';
 }
 date_default_timezone_set('America/Sao_Paulo');
 header('Content-Type: application/json; charset=utf-8');
 
-// ─── CORS: origem dinâmica para permitir credentials ──────────
+// ─── CORS: allowlist de origens autorizadas ───────────────────
+// Apenas a mesma origem do servidor é autorizada a fazer requisições
+// com credenciais (cookies de sessão). Refletir qualquer Origin seria
+// uma vulnerabilidade crítica de CORS que permite roubo de sessão.
+$_cors_scheme = (!empty($_SERVER['HTTPS']) && $_SERVER['HTTPS'] !== 'off') ? 'https' : 'http';
+$_cors_host   = $_SERVER['HTTP_HOST'] ?? '';
+$_cors_allowed = array_filter([
+    $_cors_scheme . '://' . $_cors_host,          // origem exata do servidor
+    defined('SAAS_ALLOWED_ORIGIN') ? SAAS_ALLOWED_ORIGIN : '', // override por wrapper
+]);
 $origin = $_SERVER['HTTP_ORIGIN'] ?? '';
-if ($origin) {
+if ($origin && in_array($origin, $_cors_allowed, true)) {
     header('Access-Control-Allow-Origin: ' . $origin);
     header('Access-Control-Allow-Credentials: true');
-} else {
-    header('Access-Control-Allow-Origin: *');
+} elseif (!$origin) {
+    // Requisição sem Origin (ex.: curl, Postman, chamadas server-to-server)
+    // Não emite ACAO — o browser não enviaria credentials sem Origin de qualquer forma.
+    header('Access-Control-Allow-Origin: ' . $_cors_scheme . '://' . $_cors_host);
 }
 header('Access-Control-Allow-Methods: GET, POST, PUT, DELETE, OPTIONS');
 header('Access-Control-Allow-Headers: Content-Type, Authorization');
@@ -46,6 +72,32 @@ function resp(int $code, $data): void {
     http_response_code($code);
     echo json_encode($data, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES);
     exit;
+}
+
+/**
+ * Retorna o caminho absoluto do bundle de CAs (cacert.pem).
+ *
+ * O arquivo deve ser baixado de https://curl.se/ca/cacert.pem e enviado
+ * para o mesmo diretório deste api.php (ou para o _master/ no multi-tenant).
+ * Ele NÃO deve ser web-acessível — o .htaccess já bloqueia arquivos .pem.
+ *
+ * Por que isso é necessário na Locaweb (hospedagem compartilhada):
+ *   O bundle de CAs do sistema (/etc/ssl/certs/ca-certificates.crt) pode
+ *   estar desatualizado. Apontar para um cacert.pem gerenciado manualmente
+ *   garante que a verificação TLS funcione sem precisar desabilitar a segurança.
+ *
+ * @return string|null  Caminho absoluto se o arquivo existir, null caso contrário.
+ */
+function ssl_cainfo(): ?string {
+    // Procura primeiro na mesma pasta deste arquivo, depois na pasta pai (_master/)
+    $candidates = [
+        __DIR__ . '/cacert.pem',
+        dirname(__DIR__) . '/cacert.pem',
+    ];
+    foreach ($candidates as $path) {
+        if (file_exists($path) && is_readable($path)) return $path;
+    }
+    return null; // Deixa o PHP usar o bundle do sistema (pode falhar em hosts antigos)
 }
 function auth_required(): array {
     if (!isset($_SESSION['usuario']) || !is_array($_SESSION['usuario'])) {
@@ -59,10 +111,66 @@ function get_input(): array {
     return array_merge($_POST, $json);
 }
 
+// ─── LGPD: helpers ────────────────────────────────────────────────
+function lgpd_client_ip(): string {
+    $headers = ['HTTP_CF_CONNECTING_IP','HTTP_X_FORWARDED_FOR','HTTP_X_REAL_IP','REMOTE_ADDR'];
+    foreach ($headers as $h) {
+        if (!empty($_SERVER[$h])) {
+            $ip = trim(explode(',', $_SERVER[$h])[0]);
+            if (filter_var($ip, FILTER_VALIDATE_IP)) return $ip;
+        }
+    }
+    return '';
+}
+function admin_required(): array {
+    $u = auth_required();
+    if (($u['nivel_acesso'] ?? '') !== 'admin') {
+        resp(403, ['error' => 'Acesso restrito a administradores']);
+    }
+    return $u;
+}
+function audit_log(PDO $db, string $acao, string $entidade = '', $entidade_id = null, array $detalhes = []): void {
+    try {
+        $u  = $_SESSION['usuario'] ?? null;
+        $uid   = is_array($u) ? ($u['id']   ?? null) : null;
+        $unome = is_array($u) ? ($u['nome'] ?? '')   : '';
+        $ua = substr((string)($_SERVER['HTTP_USER_AGENT'] ?? ''), 0, 255);
+        $db->prepare("INSERT INTO auditoria_lgpd (usuario_id, usuario_nome, acao, entidade, entidade_id, detalhes, ip, user_agent, data_evento) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)")
+           ->execute([
+               $uid,
+               $unome,
+               $acao,
+               $entidade,
+               $entidade_id !== null ? (int)$entidade_id : null,
+               $detalhes ? json_encode($detalhes, JSON_UNESCAPED_UNICODE) : '',
+               lgpd_client_ip(),
+               $ua,
+               date('Y-m-d H:i:s'),
+           ]);
+    } catch (\Throwable $e) { /* nunca falha por causa de auditoria */ }
+}
+function mask_cpf(string $cpf): string {
+    $d = preg_replace('/\D/', '', $cpf);
+    if (strlen($d) === 11) return substr($d,0,3) . '.***.***-' . substr($d,-2);
+    if (strlen($d) === 14) return substr($d,0,2) . '.***.***/****-' . substr($d,-2);
+    return $cpf !== '' ? str_repeat('*', max(0, strlen($cpf)-2)) . substr($cpf,-2) : '';
+}
+function mask_email(string $email): string {
+    if (!$email || strpos($email,'@') === false) return $email;
+    [$u,$d] = explode('@', $email, 2);
+    $u = $u !== '' ? mb_substr($u,0,2) . str_repeat('*', max(1, mb_strlen($u)-2)) : '';
+    return $u . '@' . $d;
+}
+function mask_telefone(string $tel): string {
+    $d = preg_replace('/\D/', '', $tel);
+    if (strlen($d) < 4) return str_repeat('*', strlen($d));
+    return str_repeat('*', strlen($d)-4) . substr($d,-4);
+}
+
 // ─── BANCO DE DADOS ──────────────────────────────────────────
-$db_path = __DIR__ . '/agtech.db3';
-if (!is_writable(__DIR__)) {
-    resp(500, ['error' => 'Sem permissão de escrita no diretório: ' . __DIR__]);
+$db_path = defined('SAAS_DB_PATH') ? SAAS_DB_PATH : SAAS_DIR . '/agtech.db3';
+if (!is_writable(SAAS_DIR)) {
+    resp(500, ['error' => 'Sem permissão de escrita no diretório: ' . SAAS_DIR]);
 }
 try {
     $db = new PDO('sqlite:' . $db_path);
@@ -87,6 +195,7 @@ $tables = [
 "CREATE TABLE IF NOT EXISTS produto_composicao (id INTEGER PRIMARY KEY AUTOINCREMENT, produto_id INTEGER NOT NULL, componente_id INTEGER, componente_descricao TEXT DEFAULT '', quantidade REAL DEFAULT 1, unidade TEXT DEFAULT 'UN')",
 "CREATE TABLE IF NOT EXISTS ordens_servico (id INTEGER PRIMARY KEY AUTOINCREMENT, cliente_id INTEGER NOT NULL, tipo_aparelho_id INTEGER, marca_id INTEGER, modelo_id INTEGER, descricao TEXT DEFAULT '', informacoes_adicionais TEXT DEFAULT '', senha_aparelho TEXT DEFAULT '', status TEXT DEFAULT 'Aberta', previsao_conclusao DATE, data_abertura DATETIME DEFAULT CURRENT_TIMESTAMP, data_atualizacao DATETIME DEFAULT CURRENT_TIMESTAMP)",
 "CREATE TABLE IF NOT EXISTS orcamentos (id INTEGER PRIMARY KEY AUTOINCREMENT, ordem_id INTEGER NOT NULL, produto_id INTEGER DEFAULT NULL, observacoes TEXT DEFAULT '', valor REAL DEFAULT 0, status_orcamento TEXT DEFAULT 'Pendente')",
+"CREATE TABLE IF NOT EXISTS orcamento_pecas (id INTEGER PRIMARY KEY AUTOINCREMENT, orcamento_id INTEGER NOT NULL, produto_id INTEGER NOT NULL, quantidade REAL DEFAULT 1)",
 "CREATE TABLE IF NOT EXISTS midias_os (id INTEGER PRIMARY KEY AUTOINCREMENT, ordem_id INTEGER NOT NULL, caminho TEXT NOT NULL, tipo TEXT DEFAULT '', comentario TEXT DEFAULT '', data_upload DATETIME DEFAULT CURRENT_TIMESTAMP)",
 "CREATE TABLE IF NOT EXISTS ordem_observacoes (id INTEGER PRIMARY KEY AUTOINCREMENT, ordem_id INTEGER NOT NULL, usuario_id INTEGER, observacao TEXT NOT NULL, data_criacao DATETIME DEFAULT CURRENT_TIMESTAMP)",
 "CREATE TABLE IF NOT EXISTS notificacoes (id INTEGER PRIMARY KEY AUTOINCREMENT, ordem_id INTEGER, novo_status TEXT DEFAULT '', lida INTEGER DEFAULT 0, data_notificacao DATETIME DEFAULT CURRENT_TIMESTAMP)",
@@ -100,13 +209,17 @@ $tables = [
 "CREATE TABLE IF NOT EXISTS fornecedores (id INTEGER PRIMARY KEY AUTOINCREMENT, razao_social TEXT NOT NULL, nome_fantasia TEXT DEFAULT '', cpf_cnpj TEXT DEFAULT '', telefone TEXT DEFAULT '', email TEXT DEFAULT '', endereco TEXT DEFAULT '', ativo INTEGER DEFAULT 1, data_criacao DATETIME DEFAULT CURRENT_TIMESTAMP)",
 "CREATE TABLE IF NOT EXISTS tabelas_preco (id INTEGER PRIMARY KEY AUTOINCREMENT, produto_id INTEGER NOT NULL, nome TEXT NOT NULL, margem_lucro REAL DEFAULT 0, preco_venda REAL DEFAULT 0)",
 "CREATE TABLE IF NOT EXISTS ncm_tabela (id INTEGER PRIMARY KEY AUTOINCREMENT, codigo TEXT NOT NULL UNIQUE, descricao TEXT NOT NULL, aliq_ii REAL DEFAULT 0, aliq_ipi REAL DEFAULT 0, aliq_pis REAL DEFAULT 0, aliq_cofins REAL DEFAULT 0)",
+"CREATE TABLE IF NOT EXISTS ibpt (ncm TEXT NOT NULL, ex TEXT NOT NULL DEFAULT '', tipo INTEGER NOT NULL DEFAULT 0, descricao TEXT DEFAULT '', nacional REAL DEFAULT 0, importado REAL DEFAULT 0, estadual REAL DEFAULT 0, municipal REAL DEFAULT 0, uf TEXT NOT NULL DEFAULT '', vigencia_inicio TEXT DEFAULT '', vigencia_fim TEXT DEFAULT '', PRIMARY KEY (ncm, ex, tipo, uf))",
 "CREATE TABLE IF NOT EXISTS cest_tabela (id INTEGER PRIMARY KEY AUTOINCREMENT, cest TEXT NOT NULL, ncm TEXT NOT NULL, descricao TEXT NOT NULL)",
 "CREATE TABLE IF NOT EXISTS tabelas_servico (id INTEGER PRIMARY KEY AUTOINCREMENT, codigo TEXT NOT NULL, descricao TEXT NOT NULL, cnae TEXT DEFAULT '', cod_trib_municipio TEXT DEFAULT '', aliq_iss REAL DEFAULT 0, cst_pis TEXT DEFAULT '01', aliq_pis REAL DEFAULT 0, cst_cofins TEXT DEFAULT '01', aliq_cofins REAL DEFAULT 0, ativo INTEGER DEFAULT 1, data_criacao DATETIME DEFAULT CURRENT_TIMESTAMP)",
 "CREATE TABLE IF NOT EXISTS notas_fiscais_entrada (id INTEGER PRIMARY KEY AUTOINCREMENT, numero TEXT DEFAULT '', serie TEXT DEFAULT '', chave_acesso TEXT NOT NULL DEFAULT '', fornecedor_id INTEGER, fornecedor_nome TEXT DEFAULT '', fornecedor_cnpj TEXT DEFAULT '', data_emissao DATE, data_entrada DATE, valor_total REAL DEFAULT 0, valor_bc_icms REAL DEFAULT 0, valor_icms REAL DEFAULT 0, valor_bc_icms_st REAL DEFAULT 0, valor_icms_st REAL DEFAULT 0, valor_ii REAL DEFAULT 0, valor_pis_st REAL DEFAULT 0, valor_cofins_st REAL DEFAULT 0, comple_icms REAL DEFAULT 0, valor_liquido REAL DEFAULT 0, valor_servico REAL DEFAULT 0, valor_ipi REAL DEFAULT 0, valor_pis REAL DEFAULT 0, valor_cofins REAL DEFAULT 0, valor_frete REAL DEFAULT 0, valor_desconto REAL DEFAULT 0, status TEXT DEFAULT 'Recebida', observacoes TEXT DEFAULT '', xml_conteudo TEXT DEFAULT '', data_importacao DATETIME DEFAULT CURRENT_TIMESTAMP)",
 "CREATE TABLE IF NOT EXISTS nfe_items (id INTEGER PRIMARY KEY AUTOINCREMENT, nfe_id INTEGER NOT NULL, codigo_produto TEXT DEFAULT '', descricao TEXT NOT NULL, ncm TEXT DEFAULT '', cfop TEXT DEFAULT '', unidade TEXT DEFAULT 'UN', quantidade REAL DEFAULT 1, valor_unitario REAL DEFAULT 0, valor_total REAL DEFAULT 0, valor_icms REAL DEFAULT 0, valor_ipi REAL DEFAULT 0, valor_pis REAL DEFAULT 0, valor_cofins REAL DEFAULT 0)",
 "CREATE TABLE IF NOT EXISTS nfce_emitidas (id INTEGER PRIMARY KEY AUTOINCREMENT, os_id INTEGER, venda_id INTEGER, n_prot TEXT DEFAULT '', status TEXT DEFAULT 'Aguardando', numero TEXT DEFAULT '', serie TEXT DEFAULT '', chave_acesso TEXT DEFAULT '', valor_total REAL DEFAULT 0, danfe_url TEXT DEFAULT '', xml_url TEXT DEFAULT '', motivo_rejeicao TEXT DEFAULT '', ambiente TEXT DEFAULT 'Homologacao', payload_json TEXT DEFAULT '', data_emissao DATETIME DEFAULT CURRENT_TIMESTAMP, data_atualizacao DATETIME DEFAULT CURRENT_TIMESTAMP)",
 "CREATE TABLE IF NOT EXISTS nfse_emitidas (id INTEGER PRIMARY KEY AUTOINCREMENT, os_id INTEGER, venda_id INTEGER, status TEXT DEFAULT 'Aguardando', numero TEXT DEFAULT '', serie TEXT DEFAULT '1', codigo_verificacao TEXT DEFAULT '', valor_total REAL DEFAULT 0, link_pdf TEXT DEFAULT '', motivo_rejeicao TEXT DEFAULT '', ambiente TEXT DEFAULT 'homologacao', payload_json TEXT DEFAULT '', cliente_nome TEXT DEFAULT '', cliente_cpfcnpj TEXT DEFAULT '', data_emissao DATETIME DEFAULT CURRENT_TIMESTAMP, data_atualizacao DATETIME DEFAULT CURRENT_TIMESTAMP)",
+// ── NF-e (modelo 55) ────────────────────────────────────────────────────────
+"CREATE TABLE IF NOT EXISTS nfe_emitidas (id INTEGER PRIMARY KEY AUTOINCREMENT, os_id INTEGER, venda_id INTEGER, n_prot TEXT DEFAULT '', status TEXT DEFAULT 'Aguardando', numero INTEGER DEFAULT 0, serie INTEGER DEFAULT 1, chave_acesso TEXT DEFAULT '', valor_total REAL DEFAULT 0, danfe_url TEXT DEFAULT '', xml_url TEXT DEFAULT '', motivo_rejeicao TEXT DEFAULT '', ambiente TEXT DEFAULT 'homologacao', payload_json TEXT DEFAULT '{}', dest_nome TEXT DEFAULT '', dest_cpfcnpj TEXT DEFAULT '', dest_uf TEXT DEFAULT '', natop TEXT DEFAULT 'VENDA DE MERCADORIA', data_emissao DATETIME DEFAULT CURRENT_TIMESTAMP, data_atualizacao DATETIME DEFAULT CURRENT_TIMESTAMP)",
 "CREATE TABLE IF NOT EXISTS uploads_temporarios (id INTEGER PRIMARY KEY AUTOINCREMENT, token TEXT UNIQUE, os_id INTEGER, status TEXT DEFAULT 'pendente', data_expiracao DATETIME)",
+"CREATE TABLE IF NOT EXISTS reset_senha_tokens (id INTEGER PRIMARY KEY AUTOINCREMENT, usuario_id INTEGER NOT NULL, token TEXT NOT NULL UNIQUE, expiracao DATETIME NOT NULL, usado INTEGER DEFAULT 0, criado_em DATETIME DEFAULT CURRENT_TIMESTAMP)",
 // ── FINANCEIRO ──────────────────────────────────────────────────────────────
 "CREATE TABLE IF NOT EXISTS categorias_financeiras (id INTEGER PRIMARY KEY AUTOINCREMENT, nome TEXT NOT NULL, tipo TEXT DEFAULT 'ambos', cor TEXT DEFAULT '#7d8590', ativo INTEGER DEFAULT 1, data_criacao DATETIME DEFAULT CURRENT_TIMESTAMP)",
 "CREATE TABLE IF NOT EXISTS contas_receber (id INTEGER PRIMARY KEY AUTOINCREMENT, origem TEXT DEFAULT 'manual', venda_id INTEGER, parcela_id INTEGER, cliente_id INTEGER, categoria_id INTEGER, conta_bancaria_id INTEGER, descricao TEXT NOT NULL, valor REAL DEFAULT 0, valor_recebido REAL DEFAULT 0, data_emissao DATE, data_vencimento DATE, data_recebimento DATE, status TEXT DEFAULT 'Aberta', documento_ref TEXT DEFAULT '', observacoes TEXT DEFAULT '', data_criacao DATETIME DEFAULT CURRENT_TIMESTAMP, data_atualizacao DATETIME DEFAULT CURRENT_TIMESTAMP)",
@@ -114,6 +227,13 @@ $tables = [
 // ── LOJA VIRTUAL ────────────────────────────────────────────────────────────
 "CREATE TABLE IF NOT EXISTS loja_categorias (id INTEGER PRIMARY KEY AUTOINCREMENT, nome TEXT NOT NULL, descricao TEXT DEFAULT '', ativo INTEGER DEFAULT 1, data_criacao DATETIME DEFAULT CURRENT_TIMESTAMP)",
 "CREATE TABLE IF NOT EXISTS produto_loja (id INTEGER PRIMARY KEY AUTOINCREMENT, produto_id INTEGER NOT NULL UNIQUE, loja_exibir INTEGER DEFAULT 0, loja_titulo TEXT DEFAULT '', loja_descricao TEXT DEFAULT '', loja_categoria_id INTEGER, loja_fotos TEXT DEFAULT '[]', loja_variacoes TEXT DEFAULT '[]', data_atualizacao DATETIME DEFAULT CURRENT_TIMESTAMP)",
+// ── FUNCIONÁRIOS ────────────────────────────────────────────────────────────
+"CREATE TABLE IF NOT EXISTS cargos (id INTEGER PRIMARY KEY AUTOINCREMENT, nome TEXT NOT NULL, ativo INTEGER DEFAULT 1, data_criacao DATETIME DEFAULT CURRENT_TIMESTAMP)",
+"CREATE TABLE IF NOT EXISTS funcionarios (id INTEGER PRIMARY KEY AUTOINCREMENT, status TEXT DEFAULT 'Ativo', nome TEXT NOT NULL, cpf TEXT DEFAULT '', data_nascimento DATE, telefone TEXT DEFAULT '', cargo_id INTEGER, carga_horaria_semanal REAL DEFAULT 0, salario_mensal REAL DEFAULT 0, valor_hora REAL DEFAULT 0, comissao_venda_ativo INTEGER DEFAULT 0, comissao_venda_percentual REAL DEFAULT 0, comissao_servico_ativo INTEGER DEFAULT 0, comissao_servico_percentual REAL DEFAULT 0, data_criacao DATETIME DEFAULT CURRENT_TIMESTAMP, data_atualizacao DATETIME DEFAULT CURRENT_TIMESTAMP)",
+// ── LGPD ────────────────────────────────────────────────────────────────────
+"CREATE TABLE IF NOT EXISTS auditoria_lgpd (id INTEGER PRIMARY KEY AUTOINCREMENT, usuario_id INTEGER, usuario_nome TEXT DEFAULT '', acao TEXT NOT NULL, entidade TEXT DEFAULT '', entidade_id INTEGER, detalhes TEXT DEFAULT '', ip TEXT DEFAULT '', user_agent TEXT DEFAULT '', data_evento DATETIME DEFAULT CURRENT_TIMESTAMP)",
+"CREATE TABLE IF NOT EXISTS consentimentos_lgpd (id INTEGER PRIMARY KEY AUTOINCREMENT, cliente_id INTEGER, identificador TEXT DEFAULT '', finalidade TEXT DEFAULT 'cadastro', politica_versao TEXT DEFAULT '', aceito INTEGER DEFAULT 1, ip TEXT DEFAULT '', user_agent TEXT DEFAULT '', origem TEXT DEFAULT '', data_evento DATETIME DEFAULT CURRENT_TIMESTAMP)",
+"CREATE TABLE IF NOT EXISTS politica_privacidade (id INTEGER PRIMARY KEY AUTOINCREMENT, versao TEXT NOT NULL, conteudo TEXT NOT NULL, ativo INTEGER DEFAULT 0, data_criacao DATETIME DEFAULT CURRENT_TIMESTAMP)",
 ];
 foreach ($tables as $sql) {
     try { $db->exec($sql); }
@@ -128,6 +248,10 @@ $migrations = [
     ['usuarios',        'ativo',            'INTEGER DEFAULT 1'],
     ['usuarios',        'email',            "TEXT DEFAULT ''"],
     ['usuarios',        'data_criacao',     'DATETIME'],
+    ['usuarios',        'funcionario_id',   'INTEGER DEFAULT NULL'],
+    ['cargos',          'tecnico',          'INTEGER DEFAULT 0'],
+    ['cargos',          'atendente',        'INTEGER DEFAULT 0'],
+    ['cargos',          'vendedor',         'INTEGER DEFAULT 0'],
     ['notas_fiscais_entrada','fornecedor_id',  'INTEGER DEFAULT NULL'],
     ['notas_fiscais_entrada','valor_bc_icms',  'REAL DEFAULT 0'],
     ['notas_fiscais_entrada','valor_bc_icms_st','REAL DEFAULT 0'],
@@ -205,9 +329,35 @@ $migrations = [
     ['ordem_observacoes','usuario_id',      'INTEGER'],
     ['ordem_observacoes','data_criacao',    'DATETIME'],
     ['orcamentos',       'data_criacao',    'DATETIME'],
+    ['orcamentos',       'peca_id',         'INTEGER DEFAULT NULL'],
     ['midias_os',        'data_upload',     'DATETIME'],
     ['clientes',         'data_criacao',    'DATETIME'],
     ['clientes',         'ativo',           'INTEGER DEFAULT 1'],
+    ['clientes',         'telefone_secundario',  "TEXT DEFAULT ''"],
+    ['clientes',         'tipo_pessoa',          "TEXT DEFAULT 'fisica'"],
+    ['clientes',         'cnpj',                 "TEXT DEFAULT ''"],
+    ['clientes',         'inscricao_estadual',   "TEXT DEFAULT ''"],
+    ['clientes',         'cep',                  "TEXT DEFAULT ''"],
+    ['clientes',         'logradouro',           "TEXT DEFAULT ''"],
+    ['clientes',         'numero',               "TEXT DEFAULT ''"],
+    ['clientes',         'complemento',          "TEXT DEFAULT ''"],
+    ['clientes',         'bairro',               "TEXT DEFAULT ''"],
+    ['clientes',         'cidade',               "TEXT DEFAULT ''"],
+    ['clientes',         'cod_ibge',             "TEXT DEFAULT ''"],
+    ['clientes',         'uf',                   "TEXT DEFAULT ''"],
+    // ── LGPD: consentimento e anonimização ─────────────────────────
+    ['clientes',         'consentimento_data',    'DATETIME'],
+    ['clientes',         'consentimento_ip',      "TEXT DEFAULT ''"],
+    ['clientes',         'consentimento_versao',  "TEXT DEFAULT ''"],
+    ['clientes',         'anonimizado',           'INTEGER DEFAULT 0'],
+    ['clientes',         'anonimizado_data',      'DATETIME'],
+    ['empresa_dados',    'dpo_nome',              "TEXT DEFAULT ''"],
+    ['empresa_dados',    'dpo_email',             "TEXT DEFAULT ''"],
+    ['empresa_dados',    'dpo_telefone',          "TEXT DEFAULT ''"],
+    ['empresa_dados',    'politica_versao_atual', "TEXT DEFAULT ''"],
+    ['nfe_emitidas',     'rascunho_dados',        "TEXT DEFAULT ''"],
+    ['nfe_emitidas',     'data_atualizacao',      "TEXT DEFAULT ''"],
+    ['ordens_servico',   'checklist',            "TEXT DEFAULT ''"],
     ['ordens_servico',   'data_abertura',   'DATETIME'],
     ['ordens_servico',   'data_atualizacao','DATETIME'],
     ['produtos',         'data_criacao',    'DATETIME'],
@@ -235,6 +385,7 @@ $migrations = [
     ['produtos',         'cfop',                     "TEXT DEFAULT ''"],
     ['produtos',         'cest',                     "TEXT DEFAULT ''"],
     ['produtos',         'origem',                   "TEXT DEFAULT '0'"],
+    ['produtos',         'csosn',                    "TEXT DEFAULT '102'"],
     ['produtos',         'cst_icms',                 "TEXT DEFAULT ''"],
     ['produtos',         'aliq_icms',                'REAL DEFAULT 0'],
     ['produtos',         'cst_pis',                  "TEXT DEFAULT ''"],
@@ -286,6 +437,16 @@ $migrations = [
     ['produtos',         'estoque_revenda',          'REAL DEFAULT 0'],
     ['produtos',         'unidade_saida',            "TEXT DEFAULT ''"],
     ['produtos',         'ncm_descricao',            "TEXT DEFAULT ''"],
+    ['produtos',         'condicao_peca',             "TEXT DEFAULT 'nova_original'"],
+    ['produtos',         'garantia_fornecedor',        'INTEGER DEFAULT 0'],
+    ['produtos',         'garantia_fornecedor_unidade',"TEXT DEFAULT 'meses'"],
+    ['produtos',         'garantia_venda',             'INTEGER DEFAULT 0'],
+    ['produtos',         'garantia_venda_unidade',     "TEXT DEFAULT 'meses'"],
+    ['produtos',         'capacidade_mah',             'INTEGER DEFAULT 0'],
+    ['produtos',         'voltagem',                   "TEXT DEFAULT ''"],
+    ['produtos',         'tipo_tela',                  "TEXT DEFAULT ''"],
+    ['produtos',         'part_number',                "TEXT DEFAULT ''"],
+    ['produtos',         'fotos',                      "TEXT DEFAULT '[]'"],
     ['vendas',           'desconto_valor',  'REAL DEFAULT 0'],
     ['vendas',           'desconto_percentual','REAL DEFAULT 0'],
     ['vendas',           'acrescimo_valor', 'REAL DEFAULT 0'],
@@ -322,9 +483,33 @@ $migrations = [
     ['produto_loja', 'loja_categoria_id',  'INTEGER'],
     ['produto_loja', 'loja_fotos',         "TEXT DEFAULT '[]'"],
     ['produto_loja', 'loja_variacoes',     "TEXT DEFAULT '[]'"],
+    ['produto_loja', 'loja_destaque',      'INTEGER DEFAULT 0'],
     ['produto_loja', 'data_atualizacao',   'DATETIME'],
     ['loja_categorias', 'descricao',       "TEXT DEFAULT ''"],
     ['loja_categorias', 'ativo',           'INTEGER DEFAULT 1'],
+    // ── NF-e (modelo 55) ─────────────────────────────────────────────────────
+    ['empresa_dados', 'nfe_ambiente',        "TEXT DEFAULT 'homologacao'"],
+    ['empresa_dados', 'nfe_serie',           "TEXT DEFAULT '1'"],
+    ['empresa_dados', 'nfe_proximo_numero',  "INTEGER DEFAULT 1"],
+    // ── Aparência da Loja Virtual ─────────────────────────────────────────────
+    ['empresa_dados', 'loja_logo',          "TEXT DEFAULT ''"],
+    ['empresa_dados', 'loja_logo_pos',      "TEXT DEFAULT '50% 50%'"],
+    ['empresa_dados', 'loja_capa',          "TEXT DEFAULT ''"],
+    ['empresa_dados', 'loja_capa_pos',      "TEXT DEFAULT '50% 50%'"],
+    ['empresa_dados', 'loja_nome',          "TEXT DEFAULT ''"],
+    ['empresa_dados', 'loja_boas_vindas',   "TEXT DEFAULT ''"],
+    ['empresa_dados', 'loja_formato',       "TEXT DEFAULT 'grade'"],
+    ['empresa_dados', 'loja_exibir_precos', "INTEGER DEFAULT 1"],
+    ['empresa_dados', 'loja_slug',          "TEXT DEFAULT ''"],
+    ['ordens_servico', 'tecnico_id',        'INTEGER DEFAULT NULL'],
+    // ── Meu Plano / assinatura ────────────────────────────────────
+    ['empresa_dados', 'mp_preapproval_id',    "TEXT DEFAULT ''"],
+    ['empresa_dados', 'plano_nome',           "TEXT DEFAULT ''"],
+    ['empresa_dados', 'plano_valor',          'REAL DEFAULT 0'],
+    ['empresa_dados', 'plano_data_inicio',    "TEXT DEFAULT ''"],
+    ['empresa_dados', 'plano_landing_url',    "TEXT DEFAULT ''"],
+    ['empresa_dados', 'plano_landing_secret', "TEXT DEFAULT ''"],
+    ['empresa_dados', 'plano_status',         "TEXT DEFAULT 'ativo'"],
 ];
 foreach ($migrations as [$tbl, $col, $def]) {
     try {
@@ -368,23 +553,27 @@ try { $db->exec("UPDATE orcamentos SET status_orcamento='Pendente' WHERE status_
 try { $db->exec("UPDATE midias_os SET comentario='' WHERE comentario IS NULL"); } catch(PDOException $e){}
 try { $db->exec("UPDATE midias_os SET tipo='' WHERE tipo IS NULL"); } catch(PDOException $e){}
 
-// ─── USUÁRIO ADMIN GARANTIDO ─────────────────────────────────
-// Cria o usuário admin@consertaos.com.br apenas se não existir.
-// NÃO atualiza a senha a cada requisição para não sobrescrever alterações.
-$admin_nome = 'admin@consertaos.com.br';
-$existe = $db->prepare("SELECT id FROM usuarios WHERE nome = ?");
-$existe->execute([$admin_nome]);
-if (!$existe->fetch()) {
-    $admin_senha = password_hash('admin123', PASSWORD_DEFAULT);
-    $db->prepare("INSERT INTO usuarios (nome, email, senha, nivel_acesso, ativo) VALUES (?, ?, ?, 'admin', 1)")
-       ->execute([$admin_nome, $admin_nome, $admin_senha]);
-}
-
+// ─── PRIMEIRO ACESSO: cria admin somente quando o banco está vazio ──
+// NÃO é mais criado um usuário fixo com senha hardcoded a cada request.
+// O provisionamento de novos clientes é feito via provisionar.php, que
+// gera uma senha aleatória no momento da criação. Este bloco só atua
+// em instalações standalone sem banco inicializado (count = 0).
 $count = (int)$db->query("SELECT COUNT(*) FROM usuarios")->fetchColumn();
 if ($count === 0) {
-    $hash = password_hash('admin123', PASSWORD_DEFAULT);
+    // Gera senha aleatória de 12 caracteres — exibida no log local apenas
+    $senha_inicial = bin2hex(random_bytes(6));
+    $hash_inicial  = password_hash($senha_inicial, PASSWORD_DEFAULT);
     $db->prepare("INSERT INTO usuarios (nome, email, senha, nivel_acesso, ativo) VALUES (?, ?, ?, ?, 1)")
-       ->execute(['Administrador', 'admin@sistema.com', $hash, 'admin']);
+       ->execute(['Administrador', 'admin@sistema.com', $hash_inicial, 'admin']);
+    // Grava senha uma única vez em arquivo de log protegido para o operador
+    $log_path = SAAS_DIR . '/logs/first_run.log';
+    if (!is_dir(dirname($log_path))) @mkdir(dirname($log_path), 0700, true);
+    @file_put_contents(
+        $log_path,
+        '[' . date('Y-m-d H:i:s') . '] Primeiro acesso — usuario: admin@sistema.com  senha: ' . $senha_inicial . "\n"
+        . "ATENÇÃO: altere esta senha imediatamente após o primeiro login e remova este arquivo.\n",
+        FILE_APPEND | LOCK_EX
+    );
 }
 
 // ─── ROTEAMENTO ──────────────────────────────────────────────
@@ -393,6 +582,126 @@ $resource = $_GET['resource'] ?? '';
 $action   = $_GET['action']   ?? '';
 $id       = (isset($_GET['id']) && is_numeric($_GET['id'])) ? (int)$_GET['id'] : null;
 $data     = get_input();
+
+// ── RESET DE SENHA (público — sem sessão) ────────────────────
+if ($resource === 'solicitar_reset' && $method === 'POST') {
+    $email = trim(strtolower((string)($data['email'] ?? '')));
+    if (!filter_var($email, FILTER_VALIDATE_EMAIL)) resp(400, ['error' => 'E-mail inválido']);
+
+    // Busca por email OU por nome (mesmo critério do login)
+    $u = $db->prepare("SELECT id, nome, email FROM usuarios WHERE (LOWER(TRIM(email))=? OR LOWER(TRIM(nome))=?) AND ativo=1 LIMIT 1");
+    $u->execute([$email, $email]);
+    $usuario = $u->fetch();
+    // Usa o email armazenado no banco para envio (pode diferir do digitado)
+    $email_destino = $usuario ? (trim($usuario['email']) ?: $email) : $email;
+
+    // Log sempre — permite diagnóstico sem revelar ao cliente se o email existe
+    @file_put_contents(SAAS_DIR . '/logs/reset_senha.log',
+        '[' . date('Y-m-d H:i:s') . "] solicitar_reset digitado={$email} banco_email=" . ($usuario['email']??'—') . " banco_nome=" . ($usuario['nome']??'—') . " status=" . ($usuario ? 'encontrado' : 'NAO_ENCONTRADO') . "\n",
+        FILE_APPEND);
+
+    if (!$usuario) resp(200, ['ok' => true]);
+
+    $token     = bin2hex(random_bytes(32));
+    $expiracao = date('Y-m-d H:i:s', time() + 3600);
+    $db->prepare("DELETE FROM reset_senha_tokens WHERE usuario_id=?")->execute([$usuario['id']]);
+    $db->prepare("INSERT INTO reset_senha_tokens (usuario_id,token,expiracao) VALUES (?,?,?)")
+       ->execute([$usuario['id'], $token, $expiracao]);
+
+    $scheme  = (!empty($_SERVER['HTTPS']) && $_SERVER['HTTPS'] !== 'off') ? 'https' : 'http';
+    $host    = $_SERVER['HTTP_HOST'] ?? '';
+    $pasta   = rtrim(dirname($_SERVER['SCRIPT_NAME'] ?? ''), '/');
+    $base    = $scheme . '://' . $host . $pasta . '/';
+    $link    = $base . '?reset_token=' . $token;
+
+    $master_cfg = file_exists(__DIR__ . '/config.php') ? (array)@require __DIR__ . '/config.php' : [];
+    $nome_curto = explode(' ', trim((string)($usuario['nome'] ?? '')))[0] ?: 'Usuário';
+    $corpo = "Olá, {$nome_curto}!\r\n\r\n"
+           . "Recebemos uma solicitação de redefinição de senha para sua conta no ConsertaOS.\r\n\r\n"
+           . "Clique no link abaixo para criar uma nova senha (válido por 1 hora):\r\n"
+           . $link . "\r\n\r\n"
+           . "Se você não solicitou isso, ignore este e-mail.\r\n\r\n"
+           . "Equipe ConsertaOS";
+
+    $assunto = 'Redefinição de senha — ConsertaOS';
+    // Envia sempre via landing page (melhor reputação com provedores como Hotmail)
+    $ok_smtp = false;
+    if (false) { // SMTP direto desativado — usar fallback da landing
+        $ok_smtp = saas_smtp_send($email_destino, $assunto, $corpo, $master_cfg);
+    }
+
+    if (!$ok_smtp) {
+        $proxy_url      = (string)($master_cfg['email_api_url']       ?? '');
+        $landing_secret = (string)($master_cfg['provisionar_secret']  ?? '');
+        if ($proxy_url !== '' && $landing_secret !== '') {
+            $ch = curl_init($proxy_url);
+            curl_setopt_array($ch, [CURLOPT_POST=>true, CURLOPT_RETURNTRANSFER=>true, CURLOPT_TIMEOUT=>15,
+                CURLOPT_SSL_VERIFYPEER=>true, CURLOPT_HTTPHEADER=>['Content-Type: application/json'],
+                CURLOPT_POSTFIELDS=>json_encode(['chave_secreta'=>$landing_secret,'para'=>$email,'assunto'=>$assunto,'corpo'=>$corpo])]);
+            $ok_smtp = (bool)curl_exec($ch);
+            curl_close($ch);
+        }
+    }
+
+    @file_put_contents(SAAS_DIR . '/logs/reset_senha.log',
+        '[' . date('Y-m-d H:i:s') . "] reset solicitado para={$email} smtp=" . ($ok_smtp?'OK':'FALHOU') . " link={$link}\n",
+        FILE_APPEND);
+    resp(200, ['ok' => true]);
+}
+
+if ($resource === 'redefinir_senha' && $method === 'POST') {
+    $token = trim((string)($data['token'] ?? ''));
+    $senha = (string)($data['senha'] ?? '');
+    if ($token === '' || strlen($senha) < 6) resp(400, ['error' => 'Token e senha (mínimo 6 caracteres) são obrigatórios']);
+
+    $st = $db->prepare("SELECT * FROM reset_senha_tokens WHERE token=? AND usado=0 AND expiracao > datetime('now','localtime')");
+    $st->execute([$token]);
+    $reset = $st->fetch();
+    if (!$reset) resp(400, ['error' => 'Link inválido ou expirado. Solicite um novo.']);
+
+    $db->prepare("UPDATE usuarios SET senha=? WHERE id=?")->execute([password_hash($senha, PASSWORD_DEFAULT), $reset['usuario_id']]);
+    $db->prepare("UPDATE reset_senha_tokens SET usado=1 WHERE token=?")->execute([$token]);
+    resp(200, ['ok' => true]);
+}
+
+function saas_smtp_send(string $to, string $subject, string $body, array $cfg): bool
+{
+    $host=$cfg['smtp_host']??''; $port=(int)($cfg['smtp_porta']??587);
+    $user=$cfg['smtp_user']??''; $pass=$cfg['smtp_pass']??'';
+    $from_full=$cfg['email_from']??$user;
+    if(!$host||!$user||!$pass) return false;
+    preg_match('/<([^>]+)>/',$from_full,$m); $from_addr=$m[1]??$from_full;
+    try {
+        // Verificação TLS habilitada com bundle de CAs atualizado.
+        // 'allow_self_signed' removido — certificados auto-assinados não são confiáveis.
+        $_smtp_cainfo = ssl_cainfo();
+        $ctx=stream_context_create(['ssl'=>[
+            'verify_peer'       => true,
+            'verify_peer_name'  => true,
+            'allow_self_signed' => false,
+            'cafile'            => $_smtp_cainfo ?? '',   // '' = usa bundle do sistema
+        ]]);
+        $errno=$errstr='';
+        $addr=($port===465)?"ssl://{$host}:{$port}":"tcp://{$host}:{$port}";
+        $sock=@stream_socket_client($addr,$errno,$errstr,10,STREAM_CLIENT_CONNECT,$ctx);
+        if(!$sock) return false;
+        $r=function()use($sock){return(string)fgets($sock,512);};
+        $s=function($l)use($sock){fwrite($sock,$l."\r\n");};
+        $r();$s("EHLO consertaos.com.br");
+        while(($ln=$r())&&strlen($ln)>3&&$ln[3]==='-');
+        if($port===587){$s("STARTTLS");$r();stream_socket_enable_crypto($sock,true,STREAM_CRYPTO_METHOD_TLS_CLIENT);$s("EHLO consertaos.com.br");while(($ln=$r())&&strlen($ln)>3&&$ln[3]==='-');}
+        $s("AUTH LOGIN");$r();$s(base64_encode($user));$r();$s(base64_encode($pass));
+        if(substr($r(),0,3)!=='235'){fclose($sock);return false;}
+        $s("MAIL FROM:<{$from_addr}>");$r();$s("RCPT TO:<{$to}>");$r();$s("DATA");$r();
+        $s("From: {$from_full}");$s("To: {$to}");
+        $s("Subject: =?UTF-8?B?".base64_encode($subject)."?=");
+        $s("MIME-Version: 1.0");$s("Content-Type: text/plain; charset=UTF-8");
+        $s("Content-Transfer-Encoding: base64");$s("X-Mailer: PHP/".PHP_VERSION);$s("");
+        $s(chunk_split(base64_encode($body)));$s(".");
+        $res=$r();$s("QUIT");fclose($sock);
+        return substr($res,0,3)==='250';
+    } catch(\Throwable $e){return false;}
+}
 
 // ─── AUTH ─────────────────────────────────────────────────────
 if ($resource === 'auth') {
@@ -441,19 +750,34 @@ if ($resource === 'auth') {
                 }
                 unset($user['senha']);
                 $_SESSION['usuario'] = $user;
+                // LGPD: regenera ID de sessão pra mitigar fixation
+                @session_regenerate_id(true);
+                audit_log($db, 'login_sucesso', 'usuarios', $user['id'] ?? null, ['login'=>$login]);
                 resp(200, ['success' => true, 'usuario' => $user]);
             }
         }
+        // LGPD: registra tentativa falha (sem expor se usuário existe)
+        audit_log($db, 'login_falha', 'usuarios', null, ['login'=>$login]);
         // Retorna mensagem genérica — não revela se o usuário existe
         resp(401, ['error' => 'Usuário ou senha inválidos']);
     }
     if ($action === 'logout' && $method === 'POST') {
+        $u = $_SESSION['usuario'] ?? null;
+        if ($u) { audit_log($db, 'logout', 'usuarios', $u['id'] ?? null); }
         session_destroy();
         resp(200, ['success' => true]);
     }
     if ($action === 'me' && $method === 'GET') {
         if (!isset($_SESSION['usuario']) || !is_array($_SESSION['usuario'])) resp(401, ['error' => 'Não autenticado']);
-        resp(200, $_SESSION['usuario']);
+        $uid = (int)($_SESSION['usuario']['id'] ?? 0);
+        if (!$uid) resp(401, ['error' => 'Não autenticado']);
+        $stmt = $db->prepare("SELECT * FROM usuarios WHERE id=? AND COALESCE(ativo,1)=1");
+        $stmt->execute([$uid]);
+        $u = $stmt->fetch();
+        if (!$u) resp(401, ['error' => 'Sessão inválida']);
+        unset($u['senha']);
+        $_SESSION['usuario'] = $u;
+        resp(200, $u);
     }
     resp(404, ['error' => 'Ação não encontrada']);
 }
@@ -493,8 +817,37 @@ if ($resource === 'empresa') {
         $cert_pfx  = array_key_exists('certificado_pfx', $data) ? $data['certificado_pfx'] : ($atual['certificado_pfx'] ?? '');
         $cert_nome = $data['certificado_nome']     ?? ($atual['certificado_nome']     ?? '');
         $cert_val  = $data['certificado_validade'] ?? ($atual['certificado_validade'] ?? '');
-        $db->prepare("UPDATE empresa_dados SET nome=?, razao_social=?, telefone=?, endereco=?, logo_principal=?, cnpj=?, ie=?, cep=?, logradouro=?, numero=?, complemento=?, bairro=?, cidade=?, uf=?, certificado_pfx=?, certificado_nome=?, certificado_validade=? WHERE id=1")
-           ->execute([$nome, $razao_social, $telefone, $endereco, $logo_principal, $cnpj, $ie, $cep, $logradouro, $numero, $complemento, $bairro, $cidade, $uf, $cert_pfx, $cert_nome, $cert_val]);
+        // Loja Virtual — aparência
+        $loja_logo_raw = array_key_exists('loja_logo', $data) ? $data['loja_logo'] : null;
+        $loja_logo = $loja_logo_raw !== null
+            ? (($loja_logo_raw === '' || strpos($loja_logo_raw, 'data:image/') === 0) ? $loja_logo_raw : ($atual['loja_logo'] ?? ''))
+            : ($atual['loja_logo'] ?? '');
+        $loja_capa_raw = array_key_exists('loja_capa', $data) ? $data['loja_capa'] : null;
+        $loja_capa = $loja_capa_raw !== null
+            ? (($loja_capa_raw === '' || strpos($loja_capa_raw, 'data:image/') === 0) ? $loja_capa_raw : ($atual['loja_capa'] ?? ''))
+            : ($atual['loja_capa'] ?? '');
+        $loja_logo_pos      = $data['loja_logo_pos']      ?? ($atual['loja_logo_pos']      ?? '50% 50%');
+        $loja_capa_pos      = $data['loja_capa_pos']      ?? ($atual['loja_capa_pos']      ?? '50% 50%');
+        $loja_nome          = trim($data['loja_nome']          ?? ($atual['loja_nome']          ?? ''));
+        $loja_boas_vindas   = $data['loja_boas_vindas']   ?? ($atual['loja_boas_vindas']   ?? '');
+        $loja_formato       = $data['loja_formato']       ?? ($atual['loja_formato']       ?? 'grade');
+        $loja_exibir_precos = isset($data['loja_exibir_precos']) ? (int)$data['loja_exibir_precos'] : (int)($atual['loja_exibir_precos'] ?? 1);
+        $loja_slug_raw = trim($data['loja_slug'] ?? ($atual['loja_slug'] ?? ''));
+        // Normaliza slug: apenas a-z, 0-9 e hifens
+        $loja_slug = preg_replace('/-+/', '-', preg_replace('/[^a-z0-9\-]/', '-', strtolower($loja_slug_raw)));
+        $loja_slug = trim($loja_slug, '-');
+        // Renomeia pasta da loja se o slug foi alterado
+        $loja_slug_antigo = trim($atual['loja_slug'] ?? '');
+        if ($loja_slug_antigo && $loja_slug && $loja_slug_antigo !== $loja_slug) {
+            $baseMinhaloja = dirname(dirname(__DIR__)) . '/minhaloja/';
+            $oldDir = $baseMinhaloja . $loja_slug_antigo;
+            $newDir = $baseMinhaloja . $loja_slug;
+            if (is_dir($oldDir) && !is_dir($newDir)) {
+                rename($oldDir, $newDir);
+            }
+        }
+        $db->prepare("UPDATE empresa_dados SET nome=?, razao_social=?, telefone=?, endereco=?, logo_principal=?, cnpj=?, ie=?, cep=?, logradouro=?, numero=?, complemento=?, bairro=?, cidade=?, uf=?, certificado_pfx=?, certificado_nome=?, certificado_validade=?, loja_logo=?, loja_logo_pos=?, loja_capa=?, loja_capa_pos=?, loja_nome=?, loja_boas_vindas=?, loja_formato=?, loja_exibir_precos=?, loja_slug=? WHERE id=1")
+           ->execute([$nome, $razao_social, $telefone, $endereco, $logo_principal, $cnpj, $ie, $cep, $logradouro, $numero, $complemento, $bairro, $cidade, $uf, $cert_pfx, $cert_nome, $cert_val, $loja_logo, $loja_logo_pos, $loja_capa, $loja_capa_pos, $loja_nome, $loja_boas_vindas, $loja_formato, $loja_exibir_precos, $loja_slug]);
         resp(200, ['success' => true]);
     }
     resp(405, ['error' => 'Método não permitido']);
@@ -642,18 +995,31 @@ if ($resource === 'clientes') {
     if ($method === 'POST') {
         if (empty($data['nome'])) resp(400, ['error' => 'Nome é obrigatório']);
         $nome_upper = mb_strtoupper(trim($data['nome']??''), 'UTF-8');
-        $db->prepare("INSERT INTO clientes (nome,email,telefone,cpf,endereco,ativo) VALUES (?,?,?,?,?,?)")
-           ->execute([$nome_upper, $data['email']??'', $data['telefone']??'', $data['cpf']??'', $data['endereco']??'', (int)($data['ativo']??1)]);
-        resp(201, ['success' => true, 'id' => (int)$db->lastInsertId()]);
+        $db->prepare("INSERT INTO clientes (nome,email,telefone,telefone_secundario,cpf,cnpj,inscricao_estadual,tipo_pessoa,endereco,cep,logradouro,numero,complemento,bairro,cidade,cod_ibge,uf,ativo) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)")
+           ->execute([$nome_upper, $data['email']??'', $data['telefone']??'', $data['telefone_secundario']??'', $data['cpf']??'', $data['cnpj']??'', $data['inscricao_estadual']??'', $data['tipo_pessoa']??'fisica', $data['endereco']??'', $data['cep']??'', $data['logradouro']??'', $data['numero']??'', $data['complemento']??'', $data['bairro']??'', $data['cidade']??'', $data['cod_ibge']??'', $data['uf']??'', (int)($data['ativo']??1)]);
+        $new_id = (int)$db->lastInsertId();
+        // LGPD: registra consentimento se foi explicitamente coletado no cadastro
+        if (!empty($data['consentimento_aceito'])) {
+            $versao = (string)($db->query("SELECT versao FROM politica_privacidade WHERE ativo=1 ORDER BY id DESC LIMIT 1")->fetchColumn() ?: '');
+            $db->prepare("INSERT INTO consentimentos_lgpd (cliente_id, identificador, finalidade, politica_versao, aceito, ip, user_agent, origem, data_evento) VALUES (?, ?, 'cadastro', ?, 1, ?, ?, 'sistema', ?)")
+               ->execute([$new_id, $data['email']??'', $versao, lgpd_client_ip(), substr((string)($_SERVER['HTTP_USER_AGENT']??''),0,255), date('Y-m-d H:i:s')]);
+            $db->prepare("UPDATE clientes SET consentimento_data=?, consentimento_ip=?, consentimento_versao=? WHERE id=?")
+               ->execute([date('Y-m-d H:i:s'), lgpd_client_ip(), $versao, $new_id]);
+        }
+        audit_log($db, 'cliente_criar', 'clientes', $new_id, ['nome'=>$nome_upper]);
+        resp(201, ['success' => true, 'id' => $new_id]);
     }
     if ($method === 'PUT' && $id !== null) {
         $nome_upper_u = mb_strtoupper(trim($data['nome']??''), 'UTF-8');
-        $db->prepare("UPDATE clientes SET nome=?,email=?,telefone=?,cpf=?,endereco=?,ativo=? WHERE id=?")
-           ->execute([$nome_upper_u, $data['email']??'', $data['telefone']??'', $data['cpf']??'', $data['endereco']??'', (int)($data['ativo']??1), $id]);
+        $db->prepare("UPDATE clientes SET nome=?,email=?,telefone=?,telefone_secundario=?,cpf=?,cnpj=?,inscricao_estadual=?,tipo_pessoa=?,endereco=?,cep=?,logradouro=?,numero=?,complemento=?,bairro=?,cidade=?,cod_ibge=?,uf=?,ativo=? WHERE id=?")
+           ->execute([$nome_upper_u, $data['email']??'', $data['telefone']??'', $data['telefone_secundario']??'', $data['cpf']??'', $data['cnpj']??'', $data['inscricao_estadual']??'', $data['tipo_pessoa']??'fisica', $data['endereco']??'', $data['cep']??'', $data['logradouro']??'', $data['numero']??'', $data['complemento']??'', $data['bairro']??'', $data['cidade']??'', $data['cod_ibge']??'', $data['uf']??'', (int)($data['ativo']??1), $id]);
+        audit_log($db, 'cliente_atualizar', 'clientes', $id, ['nome'=>$nome_upper_u]);
         resp(200, ['success' => true]);
     }
     if ($method === 'DELETE' && $id !== null) {
-        $db->prepare("DELETE FROM clientes WHERE id=?")->execute([$id]); resp(200, ['success' => true]);
+        $db->prepare("DELETE FROM clientes WHERE id=?")->execute([$id]);
+        audit_log($db, 'cliente_excluir', 'clientes', $id);
+        resp(200, ['success' => true]);
     }
     resp(405, ['error' => 'Método não permitido']);
 }
@@ -732,6 +1098,24 @@ if ($resource === 'produtos') {
     $page    = max(1, (int)($_GET['page'] ?? 1));
     $offset  = ($page - 1) * $limit;
 
+    // Filtro especial: produtos marcados para exibição na loja virtual
+    if (isset($_GET['loja_exibir']) && (int)$_GET['loja_exibir'] === 1) {
+        $wj = "(LOWER(p.descricao) LIKE ? OR LOWER(p.codigo_interno) LIKE ?) AND p.ativo=1 AND pl.loja_exibir=1";
+        $pj = [$q, $q];
+        $stC = $db->prepare("SELECT COUNT(*) FROM produtos p INNER JOIN produto_loja pl ON pl.produto_id=p.id WHERE $wj");
+        $stC->execute($pj);
+        $total = (int)$stC->fetchColumn();
+        $pages = (int)ceil(max(1, $total) / $limit);
+        $stJ = $db->prepare("SELECT p.*, pl.loja_exibir, pl.loja_destaque, pl.loja_titulo, pl.loja_descricao, pl.loja_fotos, pl.loja_variacoes, pl.loja_categoria_id FROM produtos p INNER JOIN produto_loja pl ON pl.produto_id=p.id WHERE $wj ORDER BY p.descricao LIMIT ? OFFSET ?");
+        $stJ->execute(array_merge($pj, [$limit, $offset]));
+        $rows = $stJ->fetchAll(PDO::FETCH_ASSOC);
+        foreach ($rows as &$rr) {
+            $rr['loja_fotos']     = json_decode($rr['loja_fotos']     ?? '[]', true) ?: [];
+            $rr['loja_variacoes'] = json_decode($rr['loja_variacoes'] ?? '[]', true) ?: [];
+        }
+        resp(200, ['data' => $rows, 'total' => $total, 'page' => $page, 'pages' => $pages, 'limit' => $limit]);
+    }
+
     if ($tipo_p !== '') {
         $where = "(LOWER(descricao) LIKE ? OR LOWER(codigo_interno) LIKE ?) AND ativo=1 AND tipo_item=?";
         $params = [$q, $q, $tipo_p];
@@ -740,8 +1124,6 @@ if ($resource === 'produtos') {
         $params = [$q, $q];
     }
 
-    $total = (int)$db->prepare("SELECT COUNT(*) FROM produtos WHERE $where")->execute($params) ? 
-             $db->prepare("SELECT COUNT(*) FROM produtos WHERE $where")->execute($params) : 0;
     $stCount = $db->prepare("SELECT COUNT(*) FROM produtos WHERE $where");
     $stCount->execute($params);
     $total = (int)$stCount->fetchColumn();
@@ -761,6 +1143,7 @@ if ($resource === 'produtos') {
             $loja = $sl->fetch();
             if ($loja) {
                 $r['loja_exibir']       = (int)($loja['loja_exibir'] ?? 0);
+                $r['loja_destaque']     = (int)($loja['loja_destaque'] ?? 0);
                 $r['loja_titulo']       = $loja['loja_titulo'] ?? '';
                 $r['loja_descricao']    = $loja['loja_descricao'] ?? '';
                 $r['loja_categoria_id'] = $loja['loja_categoria_id'] ?? null;
@@ -768,6 +1151,7 @@ if ($resource === 'produtos') {
                 $r['loja_variacoes']    = json_decode($loja['loja_variacoes'] ?? '[]', true) ?: [];
             } else {
                 $r['loja_exibir']       = 0;
+                $r['loja_destaque']     = 0;
                 $r['loja_titulo']       = '';
                 $r['loja_descricao']    = '';
                 $r['loja_categoria_id'] = null;
@@ -780,8 +1164,9 @@ if ($resource === 'produtos') {
     if ($method === 'POST') {
         if (empty($data['descricao'])) resp(400, ['error' => 'Descrição obrigatória']);
         $now = date('Y-m-d H:i:s');
-        $db->prepare("INSERT INTO produtos (tipo_item,ativo,codigo_interno,codigo_barras,descricao,descricao_complementar,unidade_medida,unidade_compra,unidade_saida,fator_conversao,preco_custo,despesas_acessorias,outras_despesas,custo_final,preco_venda,margem_lucro,percentual_desconto_max,percentual_comissao,estoque_atual,estoque_minimo,estoque_maximo,estoque_imobilizado,estoque_uso_consumo,estoque_revenda,localizacao,peso_liquido,peso_bruto,largura,altura,profundidade,ncm,ncm_descricao,cfop,cest,origem,cst_icms,aliq_icms,cst_pis,aliq_pis,cst_cofins,aliq_cofins,cst_ipi,aliq_ipi,nfse_movimenta,nfse_codigo_servico,nfse_municipio,nfse_cnae,nfse_descricao_servico,nfse_deducoes,nfse_cofins,nfse_ir,nfse_outras_deducoes,nfse_pis,nfse_inss,nfse_csll,nfse_iss,nfse_id_municipal_evento,nfse_descricao_evento,nfse_data_ini_evento,nfse_data_fim_evento,nfse_logradouro,nfse_numero,tabela_servico_id,codigo_nbs,iss_percentual,nfse_natureza,nfse_incentivo_fiscal,observacoes,data_criacao,data_atualizacao) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)")
-           ->execute([$data['tipo_item']??'produto',$data['ativo']??1,$data['codigo_interno']??'',(!empty($data['codigo_barras']) ? $data['codigo_barras'] : null),$data['descricao'],$data['descricao_complementar']??'',$data['unidade_medida']??'UN',$data['unidade_compra']??'',$data['unidade_saida']??'',(float)($data['fator_conversao']??1),(float)($data['preco_custo']??0),(float)($data['despesas_acessorias']??0),(float)($data['outras_despesas']??0),(float)($data['custo_final']??0),(float)($data['preco_venda']??0),(float)($data['margem_lucro']??0),(float)($data['percentual_desconto_max']??0),(float)($data['percentual_comissao']??0),(float)($data['estoque_atual']??0),(float)($data['estoque_minimo']??0),(float)($data['estoque_maximo']??0),(float)($data['estoque_imobilizado']??0),(float)($data['estoque_uso_consumo']??0),(float)($data['estoque_revenda']??0),$data['localizacao']??'',(float)($data['peso_liquido']??0),(float)($data['peso_bruto']??0),(float)($data['largura']??0),(float)($data['altura']??0),(float)($data['profundidade']??0),$data['ncm']??'',$data['ncm_descricao']??'',$data['cfop']??'',$data['cest']??'',$data['origem']??'0',$data['cst_icms']??'',(float)($data['aliq_icms']??0),$data['cst_pis']??'',(float)($data['aliq_pis']??0),$data['cst_cofins']??'',(float)($data['aliq_cofins']??0),$data['cst_ipi']??'',(float)($data['aliq_ipi']??0),(int)($data['nfse_movimenta']??0),$data['nfse_codigo_servico']??'',$data['nfse_municipio']??'',$data['nfse_cnae']??'',$data['nfse_descricao_servico']??'',(float)($data['nfse_deducoes']??0),(float)($data['nfse_cofins']??0),(float)($data['nfse_ir']??0),(float)($data['nfse_outras_deducoes']??0),(float)($data['nfse_pis']??0),(float)($data['nfse_inss']??0),(float)($data['nfse_csll']??0),(float)($data['nfse_iss']??0),$data['nfse_id_municipal_evento']??'',$data['nfse_descricao_evento']??'',$data['nfse_data_ini_evento']??'',$data['nfse_data_fim_evento']??'',$data['nfse_logradouro']??'',$data['nfse_numero']??'',$data['tabela_servico_id']??null,$data['codigo_nbs']??'',(float)($data['iss_percentual']??0),$data['nfse_natureza']??'tributacao_municipio',$data['nfse_incentivo_fiscal']??'nao',$data['observacoes']??'',$now,$now]);
+        $fotos_json = json_encode(is_array($data['fotos']??null)?$data['fotos']:[], JSON_UNESCAPED_UNICODE);
+        $db->prepare("INSERT INTO produtos (tipo_item,ativo,codigo_interno,codigo_barras,descricao,descricao_complementar,unidade_medida,unidade_compra,unidade_saida,fator_conversao,preco_custo,despesas_acessorias,outras_despesas,custo_final,preco_venda,margem_lucro,percentual_desconto_max,percentual_comissao,estoque_atual,estoque_minimo,estoque_maximo,estoque_imobilizado,estoque_uso_consumo,estoque_revenda,localizacao,peso_liquido,peso_bruto,largura,altura,profundidade,ncm,ncm_descricao,cfop,cest,origem,csosn,cst_icms,aliq_icms,cst_pis,aliq_pis,cst_cofins,aliq_cofins,cst_ipi,aliq_ipi,nfse_movimenta,nfse_codigo_servico,nfse_municipio,nfse_cnae,nfse_descricao_servico,nfse_deducoes,nfse_cofins,nfse_ir,nfse_outras_deducoes,nfse_pis,nfse_inss,nfse_csll,nfse_iss,nfse_id_municipal_evento,nfse_descricao_evento,nfse_data_ini_evento,nfse_data_fim_evento,nfse_logradouro,nfse_numero,tabela_servico_id,codigo_nbs,iss_percentual,nfse_natureza,nfse_incentivo_fiscal,observacoes,condicao_peca,garantia_fornecedor,garantia_fornecedor_unidade,garantia_venda,garantia_venda_unidade,capacidade_mah,voltagem,tipo_tela,part_number,fotos,data_criacao,data_atualizacao) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)")
+           ->execute([$data['tipo_item']??'produto',$data['ativo']??1,$data['codigo_interno']??'',(!empty($data['codigo_barras']) ? $data['codigo_barras'] : null),$data['descricao'],$data['descricao_complementar']??'',$data['unidade_medida']??'UN',$data['unidade_compra']??'',$data['unidade_saida']??'',(float)($data['fator_conversao']??1),(float)($data['preco_custo']??0),(float)($data['despesas_acessorias']??0),(float)($data['outras_despesas']??0),(float)($data['custo_final']??0),(float)($data['preco_venda']??0),(float)($data['margem_lucro']??0),(float)($data['percentual_desconto_max']??0),(float)($data['percentual_comissao']??0),(float)($data['estoque_atual']??0),(float)($data['estoque_minimo']??0),(float)($data['estoque_maximo']??0),(float)($data['estoque_imobilizado']??0),(float)($data['estoque_uso_consumo']??0),(float)($data['estoque_revenda']??0),$data['localizacao']??'',(float)($data['peso_liquido']??0),(float)($data['peso_bruto']??0),(float)($data['largura']??0),(float)($data['altura']??0),(float)($data['profundidade']??0),$data['ncm']??'',$data['ncm_descricao']??'',$data['cfop']??'',$data['cest']??'',$data['origem']??'0',$data['csosn']??'102',$data['cst_icms']??'',(float)($data['aliq_icms']??0),$data['cst_pis']??'',(float)($data['aliq_pis']??0),$data['cst_cofins']??'',(float)($data['aliq_cofins']??0),$data['cst_ipi']??'',(float)($data['aliq_ipi']??0),(int)($data['nfse_movimenta']??0),$data['nfse_codigo_servico']??'',$data['nfse_municipio']??'',$data['nfse_cnae']??'',$data['nfse_descricao_servico']??'',(float)($data['nfse_deducoes']??0),(float)($data['nfse_cofins']??0),(float)($data['nfse_ir']??0),(float)($data['nfse_outras_deducoes']??0),(float)($data['nfse_pis']??0),(float)($data['nfse_inss']??0),(float)($data['nfse_csll']??0),(float)($data['nfse_iss']??0),$data['nfse_id_municipal_evento']??'',$data['nfse_descricao_evento']??'',$data['nfse_data_ini_evento']??'',$data['nfse_data_fim_evento']??'',$data['nfse_logradouro']??'',$data['nfse_numero']??'',$data['tabela_servico_id']??null,$data['codigo_nbs']??'',(float)($data['iss_percentual']??0),$data['nfse_natureza']??'tributacao_municipio',$data['nfse_incentivo_fiscal']??'nao',$data['observacoes']??'',$data['condicao_peca']??'nova_original',(int)($data['garantia_fornecedor']??0),$data['garantia_fornecedor_unidade']??'meses',(int)($data['garantia_venda']??0),$data['garantia_venda_unidade']??'meses',(int)($data['capacidade_mah']??0),$data['voltagem']??'',$data['tipo_tela']??'',$data['part_number']??'',$fotos_json,$now,$now]);
         $newProdId = (int)$db->lastInsertId();
         // Salvar dados da aba Loja Virtual em produto_loja
         if (array_key_exists('loja_exibir', $data) || array_key_exists('loja_titulo', $data)) {
@@ -794,20 +1179,36 @@ if ($resource === 'produtos') {
         resp(201, ['success' => true, 'id' => $newProdId]);
     }
     if ($method === 'PUT' && $id !== null) {
-        $db->prepare("UPDATE produtos SET tipo_item=?,ativo=?,codigo_interno=?,codigo_barras=?,descricao=?,descricao_complementar=?,unidade_medida=?,unidade_compra=?,unidade_saida=?,fator_conversao=?,preco_custo=?,despesas_acessorias=?,outras_despesas=?,custo_final=?,preco_venda=?,margem_lucro=?,percentual_desconto_max=?,percentual_comissao=?,estoque_atual=?,estoque_minimo=?,estoque_maximo=?,estoque_imobilizado=?,estoque_uso_consumo=?,estoque_revenda=?,localizacao=?,peso_liquido=?,peso_bruto=?,largura=?,altura=?,profundidade=?,ncm=?,ncm_descricao=?,cfop=?,cest=?,origem=?,cst_icms=?,aliq_icms=?,cst_pis=?,aliq_pis=?,cst_cofins=?,aliq_cofins=?,cst_ipi=?,aliq_ipi=?,nfse_movimenta=?,nfse_codigo_servico=?,nfse_municipio=?,nfse_cnae=?,nfse_descricao_servico=?,nfse_deducoes=?,nfse_cofins=?,nfse_ir=?,nfse_outras_deducoes=?,nfse_pis=?,nfse_inss=?,nfse_csll=?,nfse_iss=?,nfse_id_municipal_evento=?,nfse_descricao_evento=?,nfse_data_ini_evento=?,nfse_data_fim_evento=?,nfse_logradouro=?,nfse_numero=?,tabela_servico_id=?,codigo_nbs=?,iss_percentual=?,nfse_natureza=?,nfse_incentivo_fiscal=?,observacoes=?,data_atualizacao=? WHERE id=?")
-           ->execute([$data['tipo_item']??'produto',$data['ativo']??1,$data['codigo_interno']??'',(!empty($data['codigo_barras']) ? $data['codigo_barras'] : null),$data['descricao'],$data['descricao_complementar']??'',$data['unidade_medida']??'UN',$data['unidade_compra']??'',$data['unidade_saida']??'',(float)($data['fator_conversao']??1),(float)($data['preco_custo']??0),(float)($data['despesas_acessorias']??0),(float)($data['outras_despesas']??0),(float)($data['custo_final']??0),(float)($data['preco_venda']??0),(float)($data['margem_lucro']??0),(float)($data['percentual_desconto_max']??0),(float)($data['percentual_comissao']??0),(float)($data['estoque_atual']??0),(float)($data['estoque_minimo']??0),(float)($data['estoque_maximo']??0),(float)($data['estoque_imobilizado']??0),(float)($data['estoque_uso_consumo']??0),(float)($data['estoque_revenda']??0),$data['localizacao']??'',(float)($data['peso_liquido']??0),(float)($data['peso_bruto']??0),(float)($data['largura']??0),(float)($data['altura']??0),(float)($data['profundidade']??0),$data['ncm']??'',$data['ncm_descricao']??'',$data['cfop']??'',$data['cest']??'',$data['origem']??'0',$data['cst_icms']??'',(float)($data['aliq_icms']??0),$data['cst_pis']??'',(float)($data['aliq_pis']??0),$data['cst_cofins']??'',(float)($data['aliq_cofins']??0),$data['cst_ipi']??'',(float)($data['aliq_ipi']??0),(int)($data['nfse_movimenta']??0),$data['nfse_codigo_servico']??'',$data['nfse_municipio']??'',$data['nfse_cnae']??'',$data['nfse_descricao_servico']??'',(float)($data['nfse_deducoes']??0),(float)($data['nfse_cofins']??0),(float)($data['nfse_ir']??0),(float)($data['nfse_outras_deducoes']??0),(float)($data['nfse_pis']??0),(float)($data['nfse_inss']??0),(float)($data['nfse_csll']??0),(float)($data['nfse_iss']??0),$data['nfse_id_municipal_evento']??'',$data['nfse_descricao_evento']??'',$data['nfse_data_ini_evento']??'',$data['nfse_data_fim_evento']??'',$data['nfse_logradouro']??'',$data['nfse_numero']??'',$data['tabela_servico_id']??null,$data['codigo_nbs']??'',(float)($data['iss_percentual']??0),$data['nfse_natureza']??'tributacao_municipio',$data['nfse_incentivo_fiscal']??'nao',$data['observacoes']??'',date('Y-m-d H:i:s'),$id]);
+        // Atualização rápida de loja_destaque (sem necessidade de enviar todos os campos do produto)
+        if (array_key_exists('loja_destaque', $data) && !array_key_exists('descricao', $data)) {
+            $chk = $db->prepare("SELECT id FROM produto_loja WHERE produto_id=?"); $chk->execute([$id]);
+            if ($chk->fetchColumn()) {
+                $db->prepare("UPDATE produto_loja SET loja_destaque=?, data_atualizacao=? WHERE produto_id=?")
+                   ->execute([(int)$data['loja_destaque'], date('Y-m-d H:i:s'), $id]);
+            } else {
+                $db->prepare("INSERT INTO produto_loja (produto_id, loja_destaque, data_atualizacao) VALUES (?,?,?)")
+                   ->execute([$id, (int)$data['loja_destaque'], date('Y-m-d H:i:s')]);
+            }
+            resp(200, ['success' => true]);
+        }
+        $fotos_json = json_encode(is_array($data['fotos']??null)?$data['fotos']:[], JSON_UNESCAPED_UNICODE);
+        $db->prepare("UPDATE produtos SET tipo_item=?,ativo=?,codigo_interno=?,codigo_barras=?,descricao=?,descricao_complementar=?,unidade_medida=?,unidade_compra=?,unidade_saida=?,fator_conversao=?,preco_custo=?,despesas_acessorias=?,outras_despesas=?,custo_final=?,preco_venda=?,margem_lucro=?,percentual_desconto_max=?,percentual_comissao=?,estoque_atual=?,estoque_minimo=?,estoque_maximo=?,estoque_imobilizado=?,estoque_uso_consumo=?,estoque_revenda=?,localizacao=?,peso_liquido=?,peso_bruto=?,largura=?,altura=?,profundidade=?,ncm=?,ncm_descricao=?,cfop=?,cest=?,origem=?,csosn=?,cst_icms=?,aliq_icms=?,cst_pis=?,aliq_pis=?,cst_cofins=?,aliq_cofins=?,cst_ipi=?,aliq_ipi=?,nfse_movimenta=?,nfse_codigo_servico=?,nfse_municipio=?,nfse_cnae=?,nfse_descricao_servico=?,nfse_deducoes=?,nfse_cofins=?,nfse_ir=?,nfse_outras_deducoes=?,nfse_pis=?,nfse_inss=?,nfse_csll=?,nfse_iss=?,nfse_id_municipal_evento=?,nfse_descricao_evento=?,nfse_data_ini_evento=?,nfse_data_fim_evento=?,nfse_logradouro=?,nfse_numero=?,tabela_servico_id=?,codigo_nbs=?,iss_percentual=?,nfse_natureza=?,nfse_incentivo_fiscal=?,observacoes=?,condicao_peca=?,garantia_fornecedor=?,garantia_fornecedor_unidade=?,garantia_venda=?,garantia_venda_unidade=?,capacidade_mah=?,voltagem=?,tipo_tela=?,part_number=?,fotos=?,data_atualizacao=? WHERE id=?")
+           ->execute([$data['tipo_item']??'produto',$data['ativo']??1,$data['codigo_interno']??'',(!empty($data['codigo_barras']) ? $data['codigo_barras'] : null),$data['descricao'],$data['descricao_complementar']??'',$data['unidade_medida']??'UN',$data['unidade_compra']??'',$data['unidade_saida']??'',(float)($data['fator_conversao']??1),(float)($data['preco_custo']??0),(float)($data['despesas_acessorias']??0),(float)($data['outras_despesas']??0),(float)($data['custo_final']??0),(float)($data['preco_venda']??0),(float)($data['margem_lucro']??0),(float)($data['percentual_desconto_max']??0),(float)($data['percentual_comissao']??0),(float)($data['estoque_atual']??0),(float)($data['estoque_minimo']??0),(float)($data['estoque_maximo']??0),(float)($data['estoque_imobilizado']??0),(float)($data['estoque_uso_consumo']??0),(float)($data['estoque_revenda']??0),$data['localizacao']??'',(float)($data['peso_liquido']??0),(float)($data['peso_bruto']??0),(float)($data['largura']??0),(float)($data['altura']??0),(float)($data['profundidade']??0),$data['ncm']??'',$data['ncm_descricao']??'',$data['cfop']??'',$data['cest']??'',$data['origem']??'0',$data['csosn']??'102',$data['cst_icms']??'',(float)($data['aliq_icms']??0),$data['cst_pis']??'',(float)($data['aliq_pis']??0),$data['cst_cofins']??'',(float)($data['aliq_cofins']??0),$data['cst_ipi']??'',(float)($data['aliq_ipi']??0),(int)($data['nfse_movimenta']??0),$data['nfse_codigo_servico']??'',$data['nfse_municipio']??'',$data['nfse_cnae']??'',$data['nfse_descricao_servico']??'',(float)($data['nfse_deducoes']??0),(float)($data['nfse_cofins']??0),(float)($data['nfse_ir']??0),(float)($data['nfse_outras_deducoes']??0),(float)($data['nfse_pis']??0),(float)($data['nfse_inss']??0),(float)($data['nfse_csll']??0),(float)($data['nfse_iss']??0),$data['nfse_id_municipal_evento']??'',$data['nfse_descricao_evento']??'',$data['nfse_data_ini_evento']??'',$data['nfse_data_fim_evento']??'',$data['nfse_logradouro']??'',$data['nfse_numero']??'',$data['tabela_servico_id']??null,$data['codigo_nbs']??'',(float)($data['iss_percentual']??0),$data['nfse_natureza']??'tributacao_municipio',$data['nfse_incentivo_fiscal']??'nao',$data['observacoes']??'',$data['condicao_peca']??'nova_original',(int)($data['garantia_fornecedor']??0),$data['garantia_fornecedor_unidade']??'meses',(int)($data['garantia_venda']??0),$data['garantia_venda_unidade']??'meses',(int)($data['capacidade_mah']??0),$data['voltagem']??'',$data['tipo_tela']??'',$data['part_number']??'',$fotos_json,date('Y-m-d H:i:s'),$id]);
         // Salvar / atualizar dados da aba Loja Virtual em produto_loja
         if (array_key_exists('loja_exibir', $data) || array_key_exists('loja_titulo', $data)) {
             $loja_fotos_j = json_encode(is_array($data['loja_fotos'] ?? null)     ? $data['loja_fotos']     : [], JSON_UNESCAPED_UNICODE);
             $loja_vars_j  = json_encode(is_array($data['loja_variacoes'] ?? null) ? $data['loja_variacoes'] : [], JSON_UNESCAPED_UNICODE);
             $loja_cat     = !empty($data['loja_categoria_id']) ? (int)$data['loja_categoria_id'] : null;
-            $chk = $db->prepare("SELECT id FROM produto_loja WHERE produto_id=?"); $chk->execute([$id]);
-            if ($chk->fetchColumn()) {
-                $db->prepare("UPDATE produto_loja SET loja_exibir=?, loja_titulo=?, loja_descricao=?, loja_categoria_id=?, loja_fotos=?, loja_variacoes=?, data_atualizacao=? WHERE produto_id=?")
-                   ->execute([(int)($data['loja_exibir']??0), trim($data['loja_titulo']??''), trim($data['loja_descricao']??''), $loja_cat, $loja_fotos_j, $loja_vars_j, date('Y-m-d H:i:s'), $id]);
+            $loja_dest    = isset($data['loja_destaque']) ? (int)$data['loja_destaque'] : null;
+            $chk = $db->prepare("SELECT id, loja_destaque FROM produto_loja WHERE produto_id=?"); $chk->execute([$id]);
+            $existingLoja = $chk->fetch();
+            if ($existingLoja) {
+                $loja_dest_final = $loja_dest !== null ? $loja_dest : (int)($existingLoja['loja_destaque'] ?? 0);
+                $db->prepare("UPDATE produto_loja SET loja_exibir=?, loja_destaque=?, loja_titulo=?, loja_descricao=?, loja_categoria_id=?, loja_fotos=?, loja_variacoes=?, data_atualizacao=? WHERE produto_id=?")
+                   ->execute([(int)($data['loja_exibir']??0), $loja_dest_final, trim($data['loja_titulo']??''), trim($data['loja_descricao']??''), $loja_cat, $loja_fotos_j, $loja_vars_j, date('Y-m-d H:i:s'), $id]);
             } else {
-                $db->prepare("INSERT INTO produto_loja (produto_id, loja_exibir, loja_titulo, loja_descricao, loja_categoria_id, loja_fotos, loja_variacoes, data_atualizacao) VALUES (?,?,?,?,?,?,?,?)")
-                   ->execute([$id, (int)($data['loja_exibir']??0), trim($data['loja_titulo']??''), trim($data['loja_descricao']??''), $loja_cat, $loja_fotos_j, $loja_vars_j, date('Y-m-d H:i:s')]);
+                $db->prepare("INSERT INTO produto_loja (produto_id, loja_exibir, loja_destaque, loja_titulo, loja_descricao, loja_categoria_id, loja_fotos, loja_variacoes, data_atualizacao) VALUES (?,?,?,?,?,?,?,?,?)")
+                   ->execute([$id, (int)($data['loja_exibir']??0), $loja_dest ?? 0, trim($data['loja_titulo']??''), trim($data['loja_descricao']??''), $loja_cat, $loja_fotos_j, $loja_vars_j, date('Y-m-d H:i:s')]);
             }
         }
         resp(200, ['success' => true]);
@@ -827,11 +1228,14 @@ if ($resource === 'ordens_servico') {
         $status = $_GET['status'] ?? '';
         $q_raw  = $_GET['q'] ?? '';
         $q      = '%' . normalizar_busca($q_raw) . '%';
+        $atraso = $_GET['atraso'] ?? '';
         $page   = max(1, (int)($_GET['page'] ?? 1));
         $limit  = 20; $offset = ($page - 1) * $limit;
         $where = ['1=1']; $params = [];
         if ($status !== '') { $where[] = 'os.status = ?'; $params[] = $status; }
-        if ($q_raw !== '') { $where[] = '(LOWER(c.nome) LIKE ? OR CAST(os.id AS TEXT) LIKE ? OR c.telefone LIKE ?)'; $params = array_merge($params, [$q, $q, $q]); }
+        if ($atraso === '1') { $where[] = "os.previsao_conclusao IS NOT NULL AND os.previsao_conclusao!='' AND os.previsao_conclusao < DATE('now') AND os.status NOT IN ('Aguardando Aparelho','Aguardando Aprovação','Aguardando Retirada','Cancelada','Faturada') AND os.status NOT LIKE 'Conclu%' AND os.status NOT LIKE 'N_o Aprovada' AND os.status NOT LIKE 'Sem Con%'"; }
+        if (($_GET['dash_os_abertas'] ?? '') === '1') { $where[] = "os.status NOT IN ('Cancelada','Faturada') AND os.status NOT LIKE 'Conclu%' AND os.status NOT LIKE 'N_o Aprov%' AND os.status NOT LIKE 'Sem Con%'"; }
+        if ($q_raw !== '') { $where[] = '(LOWER(c.nome) LIKE ? OR CAST(os.id AS TEXT) LIKE ?)'; $params = array_merge($params, [$q, $q]); }
         $w = implode(' AND ', $where);
         $tc = $db->prepare("SELECT COUNT(*) FROM ordens_servico os JOIN clientes c ON os.cliente_id=c.id WHERE $w");
         $tc->execute($params); $total = (int)$tc->fetchColumn();
@@ -840,24 +1244,115 @@ if ($resource === 'ordens_servico') {
         resp(200, ['data' => $s->fetchAll(), 'total' => $total, 'page' => $page, 'pages' => (int)ceil($total / $limit)]);
     }
     if ($method === 'GET' && $id !== null) {
-        $s = $db->prepare("SELECT os.*, c.nome AS cliente_nome, c.telefone AS cliente_telefone, c.cpf AS cliente_cpf, ta.nome AS tipo_nome, m.nome AS marca_nome, mo.nome AS modelo_nome FROM ordens_servico os JOIN clientes c ON os.cliente_id=c.id LEFT JOIN tipos_aparelho ta ON os.tipo_aparelho_id=ta.id LEFT JOIN marcas m ON os.marca_id=m.id LEFT JOIN modelos mo ON os.modelo_id=mo.id WHERE os.id=?");
+        $s = $db->prepare("SELECT os.*, c.nome AS cliente_nome, c.telefone AS cliente_telefone, c.telefone_secundario AS cliente_telefone_secundario, c.cpf AS cliente_cpf, c.cnpj AS cliente_cnpj, c.tipo_pessoa AS cliente_tipo_pessoa, ta.nome AS tipo_nome, m.nome AS marca_nome, mo.nome AS modelo_nome, f.nome AS tecnico_nome FROM ordens_servico os JOIN clientes c ON os.cliente_id=c.id LEFT JOIN tipos_aparelho ta ON os.tipo_aparelho_id=ta.id LEFT JOIN marcas m ON os.marca_id=m.id LEFT JOIN modelos mo ON os.modelo_id=mo.id LEFT JOIN funcionarios f ON f.id=os.tecnico_id WHERE os.id=?");
         $s->execute([$id]); $os = $s->fetch();
         if (!$os) resp(404, ['error' => 'Não encontrado']);
-        $s2 = $db->prepare("SELECT o.*, p.descricao AS produto_descricao, p.tipo_item AS produto_tipo FROM orcamentos o LEFT JOIN produtos p ON o.produto_id=p.id WHERE o.ordem_id=? ORDER BY o.id"); $s2->execute([$id]); $os['orcamentos'] = $s2->fetchAll();
+        $s2 = $db->prepare("SELECT o.*, p.descricao AS produto_descricao, p.tipo_item AS produto_tipo, pc.descricao AS peca_nome FROM orcamentos o LEFT JOIN produtos p ON o.produto_id=p.id LEFT JOIN produtos pc ON o.peca_id=pc.id WHERE o.ordem_id=? ORDER BY o.id"); $s2->execute([$id]); $os['orcamentos'] = $s2->fetchAll();
         $s3 = $db->prepare("SELECT * FROM midias_os WHERE ordem_id=? ORDER BY id DESC"); $s3->execute([$id]); $os['midias'] = $s3->fetchAll();
         $s4 = $db->prepare("SELECT o.*, u.nome AS usuario_nome FROM ordem_observacoes o LEFT JOIN usuarios u ON o.usuario_id=u.id WHERE o.ordem_id=? ORDER BY o.id DESC"); $s4->execute([$id]); $os['observacoes'] = $s4->fetchAll();
         resp(200, $os);
     }
-    if ($method === 'POST') {
+    if ($method === 'POST' && !$action) {
         if (empty($data['cliente_id'])) resp(400, ['error' => 'cliente_id obrigatório']);
         $db->beginTransaction();
         try {
-            $db->prepare("INSERT INTO ordens_servico (cliente_id,tipo_aparelho_id,marca_id,modelo_id,descricao,informacoes_adicionais,senha_aparelho,status,data_abertura) VALUES (?,?,?,?,?,?,?,?,?)")
-               ->execute([$data['cliente_id'],$data['tipo_aparelho_id']??null,$data['marca_id']??null,$data['modelo_id']??null,$data['descricao']??'',$data['informacoes_adicionais']??'',$data['senha_aparelho']??'',$data['status']??'Aberta',date('Y-m-d H:i:s')]);
+            $db->prepare("INSERT INTO ordens_servico (cliente_id,tipo_aparelho_id,marca_id,modelo_id,descricao,informacoes_adicionais,senha_aparelho,status,checklist,tecnico_id,data_abertura) VALUES (?,?,?,?,?,?,?,?,?,?,?)")
+               ->execute([$data['cliente_id'],$data['tipo_aparelho_id']??null,$data['marca_id']??null,$data['modelo_id']??null,$data['descricao']??'',$data['informacoes_adicionais']??'',$data['senha_aparelho']??'',$data['status']??'Aberta',$data['checklist']??'',!empty($data['tecnico_id'])?(int)$data['tecnico_id']:null,date('Y-m-d H:i:s')]);
             $lid = (int)$db->lastInsertId(); $db->commit();
             resp(201, ['success' => true, 'id' => $lid]);
         } catch (Exception $e) { $db->rollBack(); resp(500, ['error' => $e->getMessage()]); }
     }
+    // ── POST estornar_faturamento ──────────────────────────────────
+    if ($method === 'POST' && $action === 'estornar_faturamento' && $id !== null) {
+        $cur = $db->prepare("SELECT * FROM ordens_servico WHERE id=?");
+        $cur->execute([$id]); $os = $cur->fetch();
+        if (!$os) resp(404, ['error' => 'OS não encontrada']);
+        if ($os['status'] !== 'Faturada') resp(400, ['error' => 'Esta OS não está com status Faturada']);
+
+        // Verifica NFC-e vinculada
+        $sNfce = $db->prepare("SELECT * FROM nfce_emitidas WHERE os_id=? ORDER BY id DESC LIMIT 1");
+        $sNfce->execute([$id]); $nfce = $sNfce->fetch();
+        if ($nfce && !in_array($nfce['status'], ['Cancelada','Inutilizada','Rejeitada'], true)) {
+            resp(400, ['error' => 'NFC-e nº '.$nfce['numero'].' vinculada não está cancelada. Cancele a nota no módulo Fiscal antes de estornar.', 'tipo' => 'nfce', 'nfce_id' => $nfce['id']]);
+        }
+
+        // Verifica NFS-e vinculada
+        $sNfse = $db->prepare("SELECT * FROM nfse_emitidas WHERE os_id=? ORDER BY id DESC LIMIT 1");
+        $sNfse->execute([$id]); $nfse = $sNfse->fetch();
+        if ($nfse && $nfse['status'] !== 'Cancelada') {
+            resp(400, ['error' => 'NFS-e nº '.$nfse['numero'].' vinculada não está cancelada. Cancele a nota no módulo Fiscal antes de estornar.', 'tipo' => 'nfse', 'nfse_id' => $nfse['id']]);
+        }
+
+        // Busca venda simples vinculada
+        $sVenda = $db->prepare("SELECT * FROM vendas WHERE os_id=? AND status='Confirmada' ORDER BY id DESC LIMIT 1");
+        $sVenda->execute([$id]); $venda = $sVenda->fetch();
+
+        $db->beginTransaction();
+        try {
+            $now = date('Y-m-d H:i:s');
+
+            // ── Venda Simples ──────────────────────────────────────
+            if ($venda) {
+                // Cancela venda
+                $db->prepare("UPDATE vendas SET status='Cancelada' WHERE id=?")
+                   ->execute([$venda['id']]);
+
+                // Restaura estoque dos itens da venda (produtos com produto_id)
+                $siVenda = $db->prepare("SELECT produto_id, quantidade FROM venda_items WHERE venda_id=? AND produto_id IS NOT NULL");
+                $siVenda->execute([$venda['id']]);
+                $updEst = $db->prepare("UPDATE produtos SET estoque_atual = estoque_atual + ? WHERE id=?");
+                foreach ($siVenda->fetchAll() as $it) $updEst->execute([(float)$it['quantidade'], (int)$it['produto_id']]);
+
+                // Cancela contas a receber da venda
+                $db->prepare("UPDATE contas_receber SET status='Cancelada',data_atualizacao=? WHERE venda_id=? AND origem='venda' AND status NOT IN ('Cancelada','Recebida')")
+                   ->execute([$now, $venda['id']]);
+            }
+
+            // ── NFC-e (já cancelada pelo usuário) ──────────────────
+            if ($nfce) {
+                // Cancela contas a receber da NFC-e
+                $db->prepare("UPDATE contas_receber SET status='Cancelada',data_atualizacao=? WHERE venda_id=? AND origem='nfce' AND status NOT IN ('Cancelada','Recebida')")
+                   ->execute([$now, $nfce['id']]);
+
+                // Restaura estoque dos itens da NFC-e (extraídos do payload_json)
+                $payload = json_decode($nfce['payload_json'] ?? '{}', true);
+                if (!empty($payload['itens'])) {
+                    $updEstNfce = $db->prepare("UPDATE produtos SET estoque_atual = estoque_atual + ? WHERE id=?");
+                    foreach ($payload['itens'] as $it) {
+                        $pid = (int)($it['_produto_id'] ?? 0);
+                        $qty = (float)($it['quantidade'] ?? 0);
+                        if ($pid > 0 && $qty > 0) $updEstNfce->execute([$qty, $pid]);
+                    }
+                }
+            }
+
+            // ── NFS-e (já cancelada pelo usuário) ──────────────────
+            if ($nfse) {
+                $db->prepare("UPDATE contas_receber SET status='Cancelada',data_atualizacao=? WHERE venda_id=? AND origem='nfse' AND status NOT IN ('Cancelada','Recebida')")
+                   ->execute([$now, $nfse['id']]);
+            }
+
+            // ── Restaura estoque das peças dos orçamentos (baixado ao faturar) ──
+            $sPecas = $db->prepare("
+                SELECT op.produto_id, SUM(op.quantidade) AS total_qtd
+                FROM orcamento_pecas op
+                JOIN orcamentos o ON op.orcamento_id = o.id
+                WHERE o.ordem_id = ?
+                GROUP BY op.produto_id
+            ");
+            $sPecas->execute([$id]);
+            $updPeca = $db->prepare("UPDATE produtos SET estoque_atual = estoque_atual + ? WHERE id=?");
+            foreach ($sPecas->fetchAll() as $row) $updPeca->execute([(float)$row['total_qtd'], (int)$row['produto_id']]);
+
+            // ── Volta OS para Aberta ───────────────────────────────
+            $db->prepare("UPDATE ordens_servico SET status='Aberta',data_atualizacao=? WHERE id=?")->execute([$now, $id]);
+            $db->prepare("INSERT INTO notificacoes (ordem_id,novo_status) VALUES (?,?)")->execute([$id,'Aberta']);
+
+            $db->commit();
+            resp(200, ['success' => true]);
+        } catch (Exception $e) { $db->rollBack(); resp(500, ['error' => 'Erro ao estornar: '.$e->getMessage()]); }
+    }
+
     if ($method === 'PUT' && $id !== null) {
         $db->beginTransaction();
         try {
@@ -870,7 +1365,7 @@ if ($resource === 'ordens_servico') {
             $old_s = $cur_os['status'];
             $new_s = $data['status'] ?? $old_s;
 
-            $db->prepare("UPDATE ordens_servico SET cliente_id=?,tipo_aparelho_id=?,marca_id=?,modelo_id=?,descricao=?,informacoes_adicionais=?,senha_aparelho=?,status=?,previsao_conclusao=?,data_atualizacao=? WHERE id=?")
+            $db->prepare("UPDATE ordens_servico SET cliente_id=?,tipo_aparelho_id=?,marca_id=?,modelo_id=?,descricao=?,informacoes_adicionais=?,senha_aparelho=?,status=?,previsao_conclusao=?,checklist=?,tecnico_id=?,data_atualizacao=? WHERE id=?")
                ->execute([
                    $data['cliente_id']            ?? $cur_os['cliente_id'],
                    $data['tipo_aparelho_id']       ?? $cur_os['tipo_aparelho_id'],
@@ -881,16 +1376,35 @@ if ($resource === 'ordens_servico') {
                    $data['senha_aparelho']         ?? $cur_os['senha_aparelho'],
                    $new_s,
                    $data['previsao_conclusao']     ?? $cur_os['previsao_conclusao'],
+                   $data['checklist']              ?? $cur_os['checklist'],
+                   array_key_exists('tecnico_id',$data) ? (!empty($data['tecnico_id'])?(int)$data['tecnico_id']:null) : $cur_os['tecnico_id'],
                    date('Y-m-d H:i:s'),
                    $id
                ]);
             if ($old_s && $old_s !== $new_s) $db->prepare("INSERT INTO notificacoes (ordem_id,novo_status) VALUES (?,?)")->execute([$id,$new_s]);
+
+            // Baixa de estoque ao faturar — deduz peças utilizadas nos orçamentos desta OS
+            if ($new_s === 'Faturada' && $old_s !== 'Faturada') {
+                $sp = $db->prepare("
+                    SELECT op.produto_id, SUM(op.quantidade) AS total_qtd
+                    FROM orcamento_pecas op
+                    JOIN orcamentos o ON op.orcamento_id = o.id
+                    WHERE o.ordem_id = ?
+                    GROUP BY op.produto_id
+                ");
+                $sp->execute([$id]);
+                $upd = $db->prepare("UPDATE produtos SET estoque_atual = estoque_atual - ? WHERE id = ?");
+                foreach ($sp->fetchAll() as $row) {
+                    $upd->execute([(float)$row['total_qtd'], (int)$row['produto_id']]);
+                }
+            }
+
             $db->commit(); resp(200, ['success' => true]);
         } catch (Exception $e) { $db->rollBack(); resp(500, ['error' => $e->getMessage()]); }
     }
     if ($method === 'DELETE' && $id !== null) {
         $s = $db->prepare("SELECT caminho FROM midias_os WHERE ordem_id=?"); $s->execute([$id]);
-        foreach ($s->fetchAll() as $m) { $p = __DIR__ . '/' . ltrim($m['caminho'],'/'); if (file_exists($p)) unlink($p); }
+        foreach ($s->fetchAll() as $m) { $p = SAAS_DIR . '/' . ltrim($m['caminho'],'/'); if (file_exists($p)) unlink($p); }
         $db->prepare("DELETE FROM midias_os WHERE ordem_id=?")->execute([$id]);
         $db->prepare("DELETE FROM orcamentos WHERE ordem_id=?")->execute([$id]);
         $db->prepare("DELETE FROM ordem_observacoes WHERE ordem_id=?")->execute([$id]);
@@ -904,24 +1418,67 @@ if ($resource === 'ordens_servico') {
 if ($resource === 'orcamentos') {
     auth_required();
     if ($method === 'POST') {
-        $db->prepare("INSERT INTO orcamentos (ordem_id,produto_id,observacoes,valor,status_orcamento) VALUES (?,?,?,?,?)")
-           ->execute([$data['ordem_id'],$data['produto_id']??null,$data['observacoes']??'',$data['valor']??0,$data['status_orcamento']??'Pendente']);
+        $db->prepare("INSERT INTO orcamentos (ordem_id,produto_id,observacoes,valor,status_orcamento,peca_id) VALUES (?,?,?,?,?,?)")
+           ->execute([$data['ordem_id'],$data['produto_id']??null,$data['observacoes']??'',$data['valor']??0,$data['status_orcamento']??'Pendente',$data['peca_id']??null]);
         resp(201, ['success' => true, 'id' => (int)$db->lastInsertId()]);
     }
     if ($method === 'PUT' && $id !== null) {
         // Preserva produto_id se não enviado no payload
         $produto_id_upd = array_key_exists('produto_id', $data) ? ($data['produto_id']??null) : null;
+        $peca_id_upd = array_key_exists('peca_id', $data) ? ($data['peca_id'] ?? null) : null;
         if(array_key_exists('produto_id', $data)){
-            $db->prepare("UPDATE orcamentos SET produto_id=?,observacoes=?,valor=?,status_orcamento=? WHERE id=?")
-               ->execute([$produto_id_upd,$data['observacoes']??'',$data['valor']??0,$data['status_orcamento']??'Pendente',$id]);
+            $db->prepare("UPDATE orcamentos SET produto_id=?,observacoes=?,valor=?,status_orcamento=?,peca_id=? WHERE id=?")
+               ->execute([$produto_id_upd,$data['observacoes']??'',$data['valor']??0,$data['status_orcamento']??'Pendente',$peca_id_upd,$id]);
         } else {
-            $db->prepare("UPDATE orcamentos SET observacoes=?,valor=?,status_orcamento=? WHERE id=?")
-               ->execute([$data['observacoes']??'',$data['valor']??0,$data['status_orcamento']??'Pendente',$id]);
+            $db->prepare("UPDATE orcamentos SET observacoes=?,valor=?,status_orcamento=?,peca_id=? WHERE id=?")
+               ->execute([$data['observacoes']??'',$data['valor']??0,$data['status_orcamento']??'Pendente',$peca_id_upd,$id]);
         }
         resp(200, ['success' => true]);
     }
     if ($method === 'DELETE' && $id !== null) {
         $db->prepare("DELETE FROM orcamentos WHERE id=?")->execute([$id]); resp(200, ['success' => true]);
+    }
+    resp(405, ['error' => 'Método não permitido']);
+}
+
+// ─── PEÇAS DO ORÇAMENTO ───────────────────────────────────────
+if ($resource === 'orcamento_pecas') {
+    auth_required();
+    if ($method === 'GET') {
+        $orc_id = (int)($_GET['orcamento_id'] ?? 0);
+        if (!$orc_id) resp(400, ['error' => 'orcamento_id obrigatório']);
+        $s = $db->prepare("
+            SELECT op.id, op.orcamento_id, op.produto_id, op.quantidade,
+                   p.descricao AS peca_descricao, p.estoque_atual, p.codigo_interno
+            FROM orcamento_pecas op
+            LEFT JOIN produtos p ON op.produto_id = p.id
+            WHERE op.orcamento_id = ?
+            ORDER BY op.id
+        ");
+        $s->execute([$orc_id]);
+        resp(200, $s->fetchAll());
+    }
+    if ($method === 'POST') {
+        $orc_id  = (int)($data['orcamento_id'] ?? 0);
+        $prod_id = (int)($data['produto_id']   ?? 0);
+        $qtd     = (float)($data['quantidade'] ?? 1);
+        if (!$orc_id || !$prod_id) resp(400, ['error' => 'orcamento_id e produto_id obrigatórios']);
+        $db->prepare("INSERT INTO orcamento_pecas (orcamento_id, produto_id, quantidade) VALUES (?,?,?)")
+           ->execute([$orc_id, $prod_id, $qtd]);
+        $new_id = (int)$db->lastInsertId();
+        $s = $db->prepare("SELECT op.id, op.orcamento_id, op.produto_id, op.quantidade, p.descricao AS peca_descricao, p.estoque_atual, p.codigo_interno FROM orcamento_pecas op LEFT JOIN produtos p ON op.produto_id=p.id WHERE op.id=?");
+        $s->execute([$new_id]);
+        resp(201, $s->fetch());
+    }
+    if ($method === 'PUT' && $id !== null) {
+        $qtd = (float)($data['quantidade'] ?? 1);
+        if ($qtd <= 0) resp(400, ['error' => 'Quantidade deve ser maior que zero']);
+        $db->prepare("UPDATE orcamento_pecas SET quantidade=? WHERE id=?")->execute([$qtd, $id]);
+        resp(200, ['success' => true]);
+    }
+    if ($method === 'DELETE' && $id !== null) {
+        $db->prepare("DELETE FROM orcamento_pecas WHERE id=?")->execute([$id]);
+        resp(200, ['success' => true]);
     }
     resp(405, ['error' => 'Método não permitido']);
 }
@@ -970,30 +1527,142 @@ if ($resource === 'usuarios') {
         resp(200, ['success' => true]);
     }
     if ($method === 'GET' && $id === null) {
-        resp(200, $db->query("SELECT id,nome,email,nivel_acesso,COALESCE(ativo,1) as ativo FROM usuarios ORDER BY nome")->fetchAll());
+        resp(200, $db->query("SELECT id,nome,email,nivel_acesso,COALESCE(ativo,1) as ativo,funcionario_id FROM usuarios ORDER BY nome")->fetchAll());
     }
     if ($method === 'GET' && $id !== null) {
-        $s = $db->prepare("SELECT id,nome,email,nivel_acesso,COALESCE(ativo,1) as ativo FROM usuarios WHERE id=?"); $s->execute([$id]);
+        $s = $db->prepare("SELECT id,nome,email,nivel_acesso,COALESCE(ativo,1) as ativo,funcionario_id FROM usuarios WHERE id=?"); $s->execute([$id]);
         $r = $s->fetch(); resp($r ? 200 : 404, $r ?: ['error' => 'Não encontrado']);
     }
     if ($method === 'POST') {
         if (empty($data['nome']) || empty($data['senha'])) resp(400, ['error' => 'Nome e senha obrigatórios']);
         $h = password_hash($data['senha'], PASSWORD_DEFAULT);
-        $db->prepare("INSERT INTO usuarios (nome,email,senha,nivel_acesso) VALUES (?,?,?,?)")
-           ->execute([$data['nome'],$data['email']??'',$h,$data['nivel_acesso']??'tecnico']);
+        $fid = !empty($data['funcionario_id']) ? (int)$data['funcionario_id'] : null;
+        $db->prepare("INSERT INTO usuarios (nome,email,senha,nivel_acesso,funcionario_id) VALUES (?,?,?,?,?)")
+           ->execute([$data['nome'],$data['email']??'',$h,$data['nivel_acesso']??'tecnico',$fid]);
         resp(201, ['success' => true, 'id' => (int)$db->lastInsertId()]);
     }
     if ($method === 'PUT' && $id !== null) {
+        $fid = !empty($data['funcionario_id']) ? (int)$data['funcionario_id'] : null;
         if (!empty($data['senha'])) {
             $h = password_hash($data['senha'], PASSWORD_DEFAULT);
-            $db->prepare("UPDATE usuarios SET nome=?,email=?,senha=?,nivel_acesso=? WHERE id=?")->execute([$data['nome'],$data['email']??'',$h,$data['nivel_acesso']??'tecnico',$id]);
+            $db->prepare("UPDATE usuarios SET nome=?,email=?,senha=?,nivel_acesso=?,funcionario_id=? WHERE id=?")->execute([$data['nome'],$data['email']??'',$h,$data['nivel_acesso']??'tecnico',$fid,$id]);
         } else {
-            $db->prepare("UPDATE usuarios SET nome=?,email=?,nivel_acesso=? WHERE id=?")->execute([$data['nome'],$data['email']??'',$data['nivel_acesso']??'tecnico',$id]);
+            $db->prepare("UPDATE usuarios SET nome=?,email=?,nivel_acesso=?,funcionario_id=? WHERE id=?")->execute([$data['nome'],$data['email']??'',$data['nivel_acesso']??'tecnico',$fid,$id]);
+        }
+        // Atualiza sessão se o usuário editado for o próprio logado
+        if (isset($_SESSION['usuario']['id']) && (int)$_SESSION['usuario']['id'] === (int)$id) {
+            $stmt = $db->prepare("SELECT * FROM usuarios WHERE id=?");
+            $stmt->execute([$id]);
+            $u = $stmt->fetch();
+            if ($u) { unset($u['senha']); $_SESSION['usuario'] = $u; }
         }
         resp(200, ['success' => true]);
     }
     if ($method === 'DELETE' && $id !== null) {
         $db->prepare("DELETE FROM usuarios WHERE id=?")->execute([$id]); resp(200, ['success' => true]);
+    }
+    resp(405, ['error' => 'Método não permitido']);
+}
+
+// ─── CARGOS ───────────────────────────────────────────────────
+if ($resource === 'cargos') {
+    auth_required();
+    if ($method === 'GET' && $id === null) {
+        resp(200, $db->query("SELECT id, nome, ativo, COALESCE(tecnico,0) AS tecnico, COALESCE(vendedor,0) AS vendedor FROM cargos ORDER BY nome")->fetchAll());
+    }
+    if ($method === 'GET' && $id !== null) {
+        $s = $db->prepare("SELECT id, nome, ativo, COALESCE(tecnico,0) AS tecnico, COALESCE(vendedor,0) AS vendedor FROM cargos WHERE id=?"); $s->execute([$id]);
+        $r = $s->fetch(); resp($r ? 200 : 404, $r ?: ['error' => 'Não encontrado']);
+    }
+    if ($method === 'POST') {
+        $nome = trim($data['nome'] ?? '');
+        if (!$nome) resp(400, ['error' => 'Nome obrigatório']);
+        $db->prepare("INSERT INTO cargos (nome, ativo, tecnico, vendedor) VALUES (?, 1, ?, ?)")
+           ->execute([$nome, (int)($data['tecnico'] ?? 0), (int)($data['vendedor'] ?? 0)]);
+        resp(201, ['success' => true, 'id' => (int)$db->lastInsertId(), 'nome' => $nome]);
+    }
+    if ($method === 'PUT' && $id !== null) {
+        $nome = trim($data['nome'] ?? '');
+        if (!$nome) resp(400, ['error' => 'Nome obrigatório']);
+        $db->prepare("UPDATE cargos SET nome=?, ativo=?, tecnico=?, vendedor=? WHERE id=?")
+           ->execute([$nome, (int)($data['ativo'] ?? 1), (int)($data['tecnico'] ?? 0), (int)($data['vendedor'] ?? 0), $id]);
+        resp(200, ['success' => true]);
+    }
+    if ($method === 'DELETE' && $id !== null) {
+        $em_uso = $db->prepare("SELECT COUNT(*) FROM funcionarios WHERE cargo_id=?");
+        $em_uso->execute([$id]);
+        if ($em_uso->fetchColumn() > 0) resp(400, ['error' => 'Cargo em uso por um ou mais funcionários.']);
+        $db->prepare("DELETE FROM cargos WHERE id=?")->execute([$id]);
+        resp(200, ['success' => true]);
+    }
+    resp(405, ['error' => 'Método não permitido']);
+}
+
+// ─── FUNCIONÁRIOS ─────────────────────────────────────────────
+if ($resource === 'funcionarios') {
+    auth_required();
+    if ($method === 'GET' && $id === null) {
+        $where = '1=1'; $params = [];
+        if (!empty($_GET['q'])) {
+            $q = '%' . $_GET['q'] . '%';
+            $where .= ' AND (f.nome LIKE ? OR f.cpf LIKE ? OR f.telefone LIKE ?)';
+            $params = array_merge($params, [$q, $q, $q]);
+        }
+        if (!empty($_GET['cargo_id'])) {
+            $where .= ' AND f.cargo_id = ?';
+            $params[] = (int)$_GET['cargo_id'];
+        }
+        if (isset($_GET['status']) && $_GET['status'] !== '') {
+            $where .= ' AND f.status = ?';
+            $params[] = $_GET['status'];
+        }
+        $s = $db->prepare("SELECT f.*, c.nome AS cargo_nome, COALESCE(c.tecnico,0) AS cargo_tecnico, COALESCE(c.vendedor,0) AS cargo_vendedor FROM funcionarios f LEFT JOIN cargos c ON c.id=f.cargo_id WHERE $where ORDER BY f.nome");
+        $s->execute($params);
+        resp(200, $s->fetchAll());
+    }
+    if ($method === 'GET' && $id !== null) {
+        $s = $db->prepare("SELECT f.*, c.nome AS cargo_nome FROM funcionarios f LEFT JOIN cargos c ON c.id=f.cargo_id WHERE f.id=?");
+        $s->execute([$id]); $r = $s->fetch();
+        resp($r ? 200 : 404, $r ?: ['error' => 'Não encontrado']);
+    }
+    if ($method === 'POST') {
+        $nome = trim($data['nome'] ?? '');
+        if (!$nome) resp(400, ['error' => 'Nome obrigatório']);
+        $now = date('Y-m-d H:i:s');
+        $db->prepare("INSERT INTO funcionarios (status,nome,cpf,data_nascimento,telefone,cargo_id,carga_horaria_semanal,salario_mensal,valor_hora,comissao_venda_ativo,comissao_venda_percentual,comissao_servico_ativo,comissao_servico_percentual,data_criacao,data_atualizacao) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)")
+           ->execute([
+               $data['status']??'Ativo', $nome,
+               $data['cpf']??'', $data['data_nascimento']??null, $data['telefone']??'',
+               $data['cargo_id']??(int)$data['cargo_id']??null,
+               (float)($data['carga_horaria_semanal']??0), (float)($data['salario_mensal']??0),
+               (float)($data['valor_hora']??0),
+               (int)($data['comissao_venda_ativo']??0), (float)($data['comissao_venda_percentual']??0),
+               (int)($data['comissao_servico_ativo']??0), (float)($data['comissao_servico_percentual']??0),
+               $now, $now
+           ]);
+        resp(201, ['success' => true, 'id' => (int)$db->lastInsertId()]);
+    }
+    if ($method === 'PUT' && $id !== null) {
+        $nome = trim($data['nome'] ?? '');
+        if (!$nome) resp(400, ['error' => 'Nome obrigatório']);
+        $now = date('Y-m-d H:i:s');
+        $cargo_id = !empty($data['cargo_id']) ? (int)$data['cargo_id'] : null;
+        $db->prepare("UPDATE funcionarios SET status=?,nome=?,cpf=?,data_nascimento=?,telefone=?,cargo_id=?,carga_horaria_semanal=?,salario_mensal=?,valor_hora=?,comissao_venda_ativo=?,comissao_venda_percentual=?,comissao_servico_ativo=?,comissao_servico_percentual=?,data_atualizacao=? WHERE id=?")
+           ->execute([
+               $data['status']??'Ativo', $nome,
+               $data['cpf']??'', $data['data_nascimento']??null, $data['telefone']??'',
+               $cargo_id,
+               (float)($data['carga_horaria_semanal']??0), (float)($data['salario_mensal']??0),
+               (float)($data['valor_hora']??0),
+               (int)($data['comissao_venda_ativo']??0), (float)($data['comissao_venda_percentual']??0),
+               (int)($data['comissao_servico_ativo']??0), (float)($data['comissao_servico_percentual']??0),
+               $now, $id
+           ]);
+        resp(200, ['success' => true]);
+    }
+    if ($method === 'DELETE' && $id !== null) {
+        $db->prepare("DELETE FROM funcionarios WHERE id=?")->execute([$id]);
+        resp(200, ['success' => true]);
     }
     resp(405, ['error' => 'Método não permitido']);
 }
@@ -1005,7 +1674,7 @@ if ($resource === 'midias') {
     if ($method === 'POST') {
         $ordem_id = (int)($data['ordem_id'] ?? $_POST['ordem_id'] ?? 0);
         if (!$ordem_id) resp(400, ['error' => 'ordem_id obrigatório']);
-        $uploads_dir = __DIR__ . '/uploads/';
+        $uploads_dir = SAAS_DIR . '/uploads/';
         if (!is_dir($uploads_dir)) mkdir($uploads_dir, 0755, true);
         $arquivos = $_FILES['midia'] ?? [];
         if (empty($arquivos['name'])) resp(400, ['error' => 'Nenhum arquivo enviado']);
@@ -1014,10 +1683,15 @@ if ($resource === 'midias') {
         $tmps     = is_array($arquivos['tmp_name']) ? $arquivos['tmp_name'] : [$arquivos['tmp_name']];
         $erros    = is_array($arquivos['error'])   ? $arquivos['error']   : [$arquivos['error']];
         $comments = isset($_POST['midia_comment']) ? (is_array($_POST['midia_comment']) ? $_POST['midia_comment'] : [$_POST['midia_comment']]) : [];
+        // Whitelist de extensões permitidas — apenas fotos e vídeos comuns.
+        // NUNCA aceitar .php, .phtml, .phar, .js, .html, etc.
+        $ext_permitidas = ['jpg','jpeg','png','gif','webp','heic','heif','bmp','tiff','tif','pdf','mp4','mov','avi','mkv','3gp','wmv','flv'];
         $salvos = [];
         foreach ($nomes as $i => $nome_original) {
             if ($erros[$i] !== UPLOAD_ERR_OK) continue;
             $ext  = strtolower(pathinfo($nome_original, PATHINFO_EXTENSION));
+            // Bloqueia extensões não permitidas antes de tocar no disco
+            if (!in_array($ext, $ext_permitidas, true)) continue;
             $safe = preg_replace('/[^a-z0-9]/','', strtolower(pathinfo($nome_original, PATHINFO_FILENAME)));
             $nome_arquivo = $ordem_id . '_' . time() . '_' . $i . '_' . $safe . '.' . $ext;
             $destino = $uploads_dir . $nome_arquivo;
@@ -1034,7 +1708,7 @@ if ($resource === 'midias') {
     }
     if ($method === 'DELETE' && $id !== null) {
         $m = $db->prepare("SELECT caminho FROM midias_os WHERE id=?"); $m->execute([$id]); $row = $m->fetch();
-        if ($row) { $p = __DIR__ . '/' . ltrim($row['caminho'],'/'); if (file_exists($p)) unlink($p); }
+        if ($row) { $p = SAAS_DIR . '/' . ltrim($row['caminho'],'/'); if (file_exists($p)) unlink($p); }
         $db->prepare("DELETE FROM midias_os WHERE id=?")->execute([$id]);
         resp(200, ['success' => true]);
     }
@@ -1104,17 +1778,21 @@ if ($resource === 'processar_upload_mobile' && $method === 'POST') {
     if (!$row) resp(403, ['error' => 'Token inválido ou expirado']);
     if (strtotime($row['data_expiracao']) < time()) resp(403, ['error' => 'Token expirado']);
     $os_id = (int)$row['os_id'];
-    $uploads_dir = __DIR__ . '/uploads/';
+    $uploads_dir = SAAS_DIR . '/uploads/';
     if (!is_dir($uploads_dir)) mkdir($uploads_dir, 0755, true);
     $arquivos = $_FILES['imagens'] ?? [];
     if (empty($arquivos['name'])) resp(400, ['error' => 'Nenhum arquivo recebido']);
     $nomes = is_array($arquivos['name']) ? $arquivos['name'] : [$arquivos['name']];
     $tmps  = is_array($arquivos['tmp_name']) ? $arquivos['tmp_name'] : [$arquivos['tmp_name']];
     $erros = is_array($arquivos['error']) ? $arquivos['error'] : [$arquivos['error']];
+    // Mesma whitelist do endpoint /midias — bloqueia execução de código via upload
+    $ext_permitidas_mob = ['jpg','jpeg','png','gif','webp','heic','heif','bmp','tiff','tif','pdf','mp4','mov','avi','mkv','3gp','wmv','flv'];
     $salvos = [];
     foreach ($nomes as $i => $nome_original) {
         if ($erros[$i] !== UPLOAD_ERR_OK) continue;
         $ext  = strtolower(pathinfo($nome_original, PATHINFO_EXTENSION));
+        // Rejeita silenciosamente extensões fora da whitelist
+        if (!in_array($ext, $ext_permitidas_mob, true)) continue;
         $nome_arquivo = $os_id . '_' . time() . '_' . $i . '_' . bin2hex(random_bytes(4)) . '.' . $ext;
         $destino = $uploads_dir . $nome_arquivo;
         if (move_uploaded_file($tmps[$i], $destino)) {
@@ -1138,12 +1816,41 @@ if ($resource === 'dashboard') {
     $s['ordens_abertas']      = (int)$db->query("SELECT COUNT(*) FROM ordens_servico WHERE status='Aberta'")->fetchColumn();
     // Usa LIKE para cobrir variações com/sem acento (Concluída, Concluida, etc.)
     $s['ordens_concluidas']   = (int)$db->query("SELECT COUNT(*) FROM ordens_servico WHERE status LIKE 'Conclu%' OR status='Entregue' OR status='Retirada'")->fetchColumn();
-    $s['ordens_em_andamento'] = (int)$db->query("SELECT COUNT(*) FROM ordens_servico WHERE status NOT IN ('Aberta','Entregue','Retirada','Cancelada') AND status NOT LIKE 'Conclu%' AND status NOT LIKE 'N_o Aprovada' AND status NOT LIKE 'Sem Con%'")->fetchColumn();
+    $s['ordens_em_andamento'] = (int)$db->query("SELECT COUNT(*) FROM ordens_servico WHERE status NOT IN ('Aberta','Entregue','Retirada','Cancelada','Faturada') AND status NOT LIKE 'Conclu%' AND status NOT LIKE 'N_o Aprovada' AND status NOT LIKE 'Sem Con%'")->fetchColumn();
+    // OS com previsão de conclusão vencida (exclui status finais e de espera)
+    $s['ordens_atrasadas']    = (int)$db->query("SELECT COUNT(*) FROM ordens_servico WHERE previsao_conclusao IS NOT NULL AND previsao_conclusao!='' AND previsao_conclusao < DATE('now') AND status NOT IN ('Aguardando Aparelho','Aguardando Aprovação','Aguardando Retirada','Cancelada','Faturada') AND status NOT LIKE 'Conclu%' AND status NOT LIKE 'N_o Aprovada' AND status NOT LIKE 'Sem Con%'")->fetchColumn();
     $s['total_clientes']      = (int)$db->query("SELECT COUNT(*) FROM clientes")->fetchColumn();
     $s['total_produtos']      = (int)$db->query("SELECT COUNT(*) FROM produtos WHERE ativo=1")->fetchColumn();
     $s['notificacoes']        = (int)$db->query("SELECT COUNT(*) FROM notificacoes WHERE lida=0")->fetchColumn();
+    // Receita confirmada no dia (contas_receber recebidas hoje)
+    $s['receita_dia']         = (float)$db->query("SELECT COALESCE(SUM(valor_recebido),0) FROM contas_receber WHERE status='Recebida' AND DATE(data_recebimento)=DATE('now')")->fetchColumn();
+    // Total em aberto ou vencido a receber
+    $s['contas_a_receber']    = (float)$db->query("SELECT COALESCE(SUM(valor),0) FROM contas_receber WHERE status IN ('Aberta','Vencida')")->fetchColumn();
+    // Ticket médio: faturamento total / número de vendas confirmadas
+    $vm = $db->query("SELECT COALESCE(SUM(total),0) as fat, COUNT(*) as cnt FROM vendas WHERE status NOT IN ('Digitação','Cancelada')")->fetch();
+    $s['ticket_medio']        = ($vm && $vm['cnt'] > 0) ? round($vm['fat'] / $vm['cnt'], 2) : 0.0;
     $s['por_status']          = $db->query("SELECT status, COUNT(*) as total FROM ordens_servico GROUP BY status ORDER BY total DESC")->fetchAll();
     $s['recentes']            = $db->query("SELECT os.id, os.status, os.data_abertura, c.nome AS cliente_nome, ta.nome AS tipo_nome FROM ordens_servico os JOIN clientes c ON os.cliente_id=c.id LEFT JOIN tipos_aparelho ta ON os.tipo_aparelho_id=ta.id ORDER BY os.id DESC LIMIT 5")->fetchAll();
+    $s['recentes_vendas']     = $db->query("
+        SELECT descricao, cliente_nome, valor FROM (
+            SELECT 'Venda Simples' AS descricao, COALESCE(c.nome,'—') AS cliente_nome, v.total AS valor, COALESCE(v.data_confirmacao,v.data_criacao) AS data_ref
+            FROM vendas v LEFT JOIN clientes c ON c.id=v.cliente_id
+            WHERE v.status NOT IN ('Digitação','Cancelada')
+              AND NOT EXISTS (SELECT 1 FROM nfce_emitidas nx WHERE nx.venda_id=v.id)
+              AND NOT EXISTS (SELECT 1 FROM nfse_emitidas ns WHERE ns.venda_id=v.id)
+              AND NOT EXISTS (SELECT 1 FROM nfe_emitidas ne WHERE ne.venda_id=v.id)
+            UNION ALL
+            SELECT 'NFC-e' AS descricao, COALESCE(c.nome,'—') AS cliente_nome, nf.valor_total AS valor, nf.data_emissao AS data_ref
+            FROM nfce_emitidas nf LEFT JOIN vendas v ON v.id=nf.venda_id LEFT JOIN clientes c ON c.id=v.cliente_id
+            WHERE nf.status NOT IN ('Cancelada')
+            UNION ALL
+            SELECT 'NFS-e' AS descricao, COALESCE(nf.cliente_nome,'—') AS cliente_nome, nf.valor_total AS valor, nf.data_emissao AS data_ref
+            FROM nfse_emitidas nf WHERE nf.status NOT IN ('Cancelada')
+            UNION ALL
+            SELECT 'NF-e' AS descricao, COALESCE(nf.dest_nome,'—') AS cliente_nome, nf.valor_total AS valor, nf.data_emissao AS data_ref
+            FROM nfe_emitidas nf WHERE nf.status NOT IN ('Cancelada')
+        ) ORDER BY data_ref DESC LIMIT 10
+    ")->fetchAll();
     resp(200, $s);
 }
 
@@ -1258,6 +1965,217 @@ if ($resource === 'faturamento_grafico' && $method === 'GET') {
 }
 
 // ─── CONSULTA PÚBLICA ─────────────────────────────────────────
+// ─── LGPD ─────────────────────────────────────────────────────
+// Endpoints para conformidade com a Lei Geral de Proteção de Dados.
+// Operações administrativas exigem nível 'admin'.
+if ($resource === 'lgpd') {
+    // ----- POLÍTICA DE PRIVACIDADE -----
+    // GET público: retorna versão ativa
+    if ($action === 'politica_ativa' && $method === 'GET') {
+        $r = $db->query("SELECT versao, conteudo, data_criacao FROM politica_privacidade WHERE ativo=1 ORDER BY id DESC LIMIT 1")->fetch();
+        $emp = $db->query("SELECT dpo_nome, dpo_email, dpo_telefone, nome, razao_social, cnpj FROM empresa_dados WHERE id=1")->fetch() ?: [];
+        resp(200, [
+            'politica' => $r ?: null,
+            'empresa'  => $emp,
+        ]);
+    }
+    // Admin: listar versões
+    if ($action === 'politica_lista' && $method === 'GET') {
+        admin_required();
+        $rs = $db->query("SELECT id, versao, ativo, data_criacao FROM politica_privacidade ORDER BY id DESC")->fetchAll();
+        resp(200, $rs);
+    }
+    // Admin: ler versão
+    if ($action === 'politica' && $method === 'GET') {
+        admin_required();
+        if (!$id) resp(400, ['error' => 'ID obrigatório']);
+        $s = $db->prepare("SELECT * FROM politica_privacidade WHERE id=?");
+        $s->execute([$id]);
+        $r = $s->fetch();
+        resp($r ? 200 : 404, $r ?: ['error' => 'Não encontrado']);
+    }
+    // Admin: criar nova versão (e marcar como ativa)
+    if ($action === 'politica' && $method === 'POST') {
+        $u = admin_required();
+        $versao   = trim($data['versao']   ?? date('Y-m-d'));
+        $conteudo = trim($data['conteudo'] ?? '');
+        $ativar   = !empty($data['ativar']);
+        if ($conteudo === '') resp(400, ['error' => 'Conteúdo obrigatório']);
+        $db->prepare("INSERT INTO politica_privacidade (versao, conteudo, ativo, data_criacao) VALUES (?, ?, ?, ?)")
+           ->execute([$versao, $conteudo, $ativar ? 1 : 0, date('Y-m-d H:i:s')]);
+        $novo_id = (int)$db->lastInsertId();
+        if ($ativar) {
+            $db->prepare("UPDATE politica_privacidade SET ativo=0 WHERE id<>?")->execute([$novo_id]);
+            $db->prepare("UPDATE empresa_dados SET politica_versao_atual=? WHERE id=1")->execute([$versao]);
+        }
+        audit_log($db, 'politica_criar', 'politica_privacidade', $novo_id, ['versao'=>$versao,'ativar'=>$ativar]);
+        resp(200, ['success' => true, 'id' => $novo_id]);
+    }
+    // Admin: ativar versão existente
+    if ($action === 'politica_ativar' && $method === 'POST') {
+        admin_required();
+        $pid = (int)($data['id'] ?? 0);
+        if (!$pid) resp(400, ['error' => 'ID obrigatório']);
+        $s = $db->prepare("SELECT versao FROM politica_privacidade WHERE id=?");
+        $s->execute([$pid]); $p = $s->fetch();
+        if (!$p) resp(404, ['error' => 'Não encontrado']);
+        $db->exec("UPDATE politica_privacidade SET ativo=0");
+        $db->prepare("UPDATE politica_privacidade SET ativo=1 WHERE id=?")->execute([$pid]);
+        $db->prepare("UPDATE empresa_dados SET politica_versao_atual=? WHERE id=1")->execute([$p['versao']]);
+        audit_log($db, 'politica_ativar', 'politica_privacidade', $pid, ['versao'=>$p['versao']]);
+        resp(200, ['success' => true]);
+    }
+
+    // ----- DPO / ENCARREGADO -----
+    if ($action === 'dpo' && $method === 'GET') {
+        admin_required();
+        $r = $db->query("SELECT dpo_nome, dpo_email, dpo_telefone FROM empresa_dados WHERE id=1")->fetch() ?: [];
+        resp(200, $r);
+    }
+    if ($action === 'dpo' && $method === 'POST') {
+        admin_required();
+        $db->prepare("UPDATE empresa_dados SET dpo_nome=?, dpo_email=?, dpo_telefone=? WHERE id=1")
+           ->execute([
+               trim($data['dpo_nome']     ?? ''),
+               trim($data['dpo_email']    ?? ''),
+               trim($data['dpo_telefone'] ?? ''),
+           ]);
+        audit_log($db, 'dpo_atualizar', 'empresa_dados', 1, ['email'=>$data['dpo_email']??'']);
+        resp(200, ['success' => true]);
+    }
+
+    // ----- CONSENTIMENTO (público + autenticado) -----
+    // Registra aceite explícito do titular. Usado no /consulta público
+    // e também no cadastro de cliente autenticado.
+    if ($action === 'consentimento' && $method === 'POST') {
+        $cliente_id    = isset($data['cliente_id']) && is_numeric($data['cliente_id']) ? (int)$data['cliente_id'] : null;
+        $identificador = trim($data['identificador'] ?? '');
+        $finalidade    = trim($data['finalidade']    ?? 'cadastro');
+        $origem        = trim($data['origem']        ?? 'sistema');
+        $aceito        = isset($data['aceito']) ? (int)!!$data['aceito'] : 1;
+        // versão da política em vigor
+        $versao = (string)($db->query("SELECT versao FROM politica_privacidade WHERE ativo=1 ORDER BY id DESC LIMIT 1")->fetchColumn() ?: '');
+        $ua = substr((string)($_SERVER['HTTP_USER_AGENT'] ?? ''), 0, 255);
+        $db->prepare("INSERT INTO consentimentos_lgpd (cliente_id, identificador, finalidade, politica_versao, aceito, ip, user_agent, origem, data_evento) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)")
+           ->execute([$cliente_id, $identificador, $finalidade, $versao, $aceito, lgpd_client_ip(), $ua, $origem, date('Y-m-d H:i:s')]);
+        if ($cliente_id && $aceito) {
+            $db->prepare("UPDATE clientes SET consentimento_data=?, consentimento_ip=?, consentimento_versao=? WHERE id=?")
+               ->execute([date('Y-m-d H:i:s'), lgpd_client_ip(), $versao, $cliente_id]);
+        }
+        resp(200, ['success' => true]);
+    }
+    if ($action === 'consentimentos' && $method === 'GET') {
+        admin_required();
+        $cid = isset($_GET['cliente_id']) ? (int)$_GET['cliente_id'] : 0;
+        if ($cid) {
+            $s = $db->prepare("SELECT * FROM consentimentos_lgpd WHERE cliente_id=? ORDER BY id DESC");
+            $s->execute([$cid]);
+            resp(200, $s->fetchAll());
+        }
+        $rs = $db->query("SELECT * FROM consentimentos_lgpd ORDER BY id DESC LIMIT 200")->fetchAll();
+        resp(200, $rs);
+    }
+
+    // ----- DIREITOS DO TITULAR -----
+    // Exportar todos os dados pessoais associados a um cliente (portabilidade/acesso)
+    if ($action === 'exportar' && $method === 'GET') {
+        admin_required();
+        $cid = (int)($_GET['cliente_id'] ?? 0);
+        if (!$cid) resp(400, ['error' => 'cliente_id obrigatório']);
+        $s = $db->prepare("SELECT * FROM clientes WHERE id=?"); $s->execute([$cid]);
+        $cli = $s->fetch();
+        if (!$cli) resp(404, ['error' => 'Cliente não encontrado']);
+        $os  = $db->prepare("SELECT * FROM ordens_servico WHERE cliente_id=?"); $os->execute([$cid]);
+        $ven = $db->prepare("SELECT v.* FROM vendas v WHERE EXISTS (SELECT 1 FROM ordens_servico os WHERE os.id = v.os_id AND os.cliente_id=?) OR v.cliente_id=?");
+        try { $ven->execute([$cid, $cid]); $vendas = $ven->fetchAll(); } catch (\Throwable $e) { $vendas = []; }
+        $cons = $db->prepare("SELECT * FROM consentimentos_lgpd WHERE cliente_id=?"); $cons->execute([$cid]);
+        $payload = [
+            'gerado_em' => date('c'),
+            'cliente'   => $cli,
+            'ordens_servico' => $os->fetchAll(),
+            'vendas'    => $vendas,
+            'consentimentos' => $cons->fetchAll(),
+        ];
+        audit_log($db, 'titular_exportar', 'clientes', $cid, ['nome'=>$cli['nome'] ?? '']);
+        resp(200, $payload);
+    }
+    // Anonimizar: preserva registros fiscais mas remove identificadores pessoais
+    if ($action === 'anonimizar' && $method === 'POST') {
+        $u = admin_required();
+        $cid = (int)($data['cliente_id'] ?? 0);
+        if (!$cid) resp(400, ['error' => 'cliente_id obrigatório']);
+        $s = $db->prepare("SELECT * FROM clientes WHERE id=?"); $s->execute([$cid]);
+        $cli = $s->fetch();
+        if (!$cli) resp(404, ['error' => 'Cliente não encontrado']);
+        $marcador = 'TITULAR ANONIMIZADO #' . $cid;
+        $db->prepare("UPDATE clientes SET nome=?, email='', telefone='', telefone_secundario='', cpf='', cnpj='', endereco='', cep='', logradouro='', numero='', complemento='', bairro='', cidade='', uf='', inscricao_estadual='', anonimizado=1, anonimizado_data=? WHERE id=?")
+           ->execute([$marcador, date('Y-m-d H:i:s'), $cid]);
+        // Limpa senha do aparelho em OSs
+        try { $db->prepare("UPDATE ordens_servico SET senha_aparelho='' WHERE cliente_id=?")->execute([$cid]); } catch (\Throwable $e) {}
+        audit_log($db, 'titular_anonimizar', 'clientes', $cid, ['nome_original'=>$cli['nome'] ?? '']);
+        resp(200, ['success' => true]);
+    }
+    // Excluir definitivamente quando não houver vínculo fiscal (OS, vendas, NFe)
+    if ($action === 'excluir' && $method === 'POST') {
+        $u = admin_required();
+        $cid = (int)($data['cliente_id'] ?? 0);
+        if (!$cid) resp(400, ['error' => 'cliente_id obrigatório']);
+        $tem_os    = (int)$db->query("SELECT COUNT(*) FROM ordens_servico WHERE cliente_id=$cid")->fetchColumn();
+        $tem_venda = 0;
+        try { $tem_venda = (int)$db->query("SELECT COUNT(*) FROM vendas WHERE cliente_id=$cid")->fetchColumn(); } catch (\Throwable $e) {}
+        if ($tem_os > 0 || $tem_venda > 0) {
+            resp(409, [
+                'error' => 'Cliente possui histórico fiscal (OS ou vendas). Utilize a anonimização para preservar a obrigação legal de guarda dos registros.',
+                'ordens' => $tem_os,
+                'vendas' => $tem_venda,
+            ]);
+        }
+        $s = $db->prepare("SELECT nome FROM clientes WHERE id=?"); $s->execute([$cid]);
+        $nome = (string)$s->fetchColumn();
+        $db->prepare("DELETE FROM clientes WHERE id=?")->execute([$cid]);
+        $db->prepare("DELETE FROM consentimentos_lgpd WHERE cliente_id=?")->execute([$cid]);
+        audit_log($db, 'titular_excluir', 'clientes', $cid, ['nome_original'=>$nome]);
+        resp(200, ['success' => true]);
+    }
+
+    // ----- AUDITORIA -----
+    if ($action === 'auditoria' && $method === 'GET') {
+        admin_required();
+        $limit  = max(1, min(500, (int)($_GET['limit'] ?? 100)));
+        $page   = max(1, (int)($_GET['page'] ?? 1));
+        $offset = ($page - 1) * $limit;
+        $where  = '1=1';
+        $params = [];
+        if (!empty($_GET['acao']))      { $where .= ' AND acao LIKE ?';      $params[] = '%' . $_GET['acao'] . '%'; }
+        if (!empty($_GET['entidade']))  { $where .= ' AND entidade = ?';     $params[] = $_GET['entidade']; }
+        if (!empty($_GET['usuario_id'])){ $where .= ' AND usuario_id = ?';   $params[] = (int)$_GET['usuario_id']; }
+        if (!empty($_GET['data_de']))   { $where .= ' AND data_evento >= ?'; $params[] = $_GET['data_de'] . ' 00:00:00'; }
+        if (!empty($_GET['data_ate']))  { $where .= ' AND data_evento <= ?'; $params[] = $_GET['data_ate'] . ' 23:59:59'; }
+        $tc = $db->prepare("SELECT COUNT(*) FROM auditoria_lgpd WHERE $where");
+        $tc->execute($params);
+        $total = (int)$tc->fetchColumn();
+        $sql = "SELECT * FROM auditoria_lgpd WHERE $where ORDER BY id DESC LIMIT ? OFFSET ?";
+        $st  = $db->prepare($sql);
+        $st->execute(array_merge($params, [$limit, $offset]));
+        resp(200, [
+            'data'  => $st->fetchAll(),
+            'total' => $total,
+            'page'  => $page,
+            'pages' => (int)ceil(max(1,$total)/$limit),
+            'limit' => $limit,
+        ]);
+    }
+    // Endpoint usado pelo frontend para logar o "revelar dados completos"
+    if ($action === 'log_revelacao' && $method === 'POST') {
+        auth_required();
+        $cid = (int)($data['cliente_id'] ?? 0);
+        $campo = (string)($data['campo'] ?? '');
+        audit_log($db, 'pii_revelar', 'clientes', $cid ?: null, ['campo'=>$campo]);
+        resp(200, ['success' => true]);
+    }
+    resp(404, ['error' => 'Ação LGPD não encontrada']);
+}
+
 if ($resource === 'consulta_publica' && $method === 'GET') {
     $oid = $_GET['id'] ?? null;
     if (!$oid || !is_numeric($oid)) resp(400, ['error' => 'ID inv\u00e1lido']);
@@ -1381,6 +2299,15 @@ if ($resource === 'vendas') {
                 $pid = isset($item['produto_id']) && (int)$item['produto_id'] > 0 ? (int)$item['produto_id'] : null;
                 $db->prepare("INSERT INTO venda_items (venda_id,produto_id,descricao,quantidade,valor_unitario,desconto_valor,acrescimo_valor,subtotal) VALUES (?,?,?,?,?,?,?,?)")
                    ->execute([$vid,$pid,$desc_item_str,$qty,$vu,$desc_amt,$acres_amt,$sub]);
+            }
+            // Baixa de estoque (apenas para vendas confirmadas)
+            if ($venda_status === 'Confirmada') {
+                $stBaixa = $db->prepare("UPDATE produtos SET estoque_atual = estoque_atual - ? WHERE id=?");
+                foreach ($items as $item) {
+                    $pid = isset($item['produto_id']) && (int)$item['produto_id'] > 0 ? (int)$item['produto_id'] : 0;
+                    $qty = (float)($item['quantidade'] ?? 1);
+                    if ($pid > 0 && $qty > 0) $stBaixa->execute([$qty, $pid]);
+                }
             }
             // Faturamentos e parcelas
             foreach (($data['faturamentos']??[]) as $fat) {
@@ -2061,7 +2988,7 @@ if ($resource === 'produto_loja') {
 
 // ─── TABELAS DE SERVIÇO ───────────────────────────────────────
 // ─── NOTAS FISCAIS DE ENTRADA ────────────────────────────────
-if ($resource === 'nfe') {
+if ($resource === 'nfe_entrada') {
     auth_required();
     if ($method === 'GET' && $id === null) {
         $q     = '%'.($_GET['q']??'').'%';
@@ -2097,6 +3024,20 @@ if ($resource === 'nfe') {
                 $si->execute([$nfeId,$it['codigo_produto']??'',$it['descricao']??'',$it['ncm']??'',$it['cfop']??'',$it['unidade']??'UN',(float)($it['quantidade']??1),(float)($it['valor_unitario']??0),(float)($it['valor_total']??0),(float)($it['valor_icms']??0),(float)($it['valor_ipi']??0),(float)($it['valor_pis']??0),(float)($it['valor_cofins']??0)]);
             }
         }
+        // ── Atualizar estoque dos produtos ────────────────────────────────
+        if (!empty($data['items'])) {
+            $sqEstoque = $db->prepare(
+                "UPDATE produtos SET estoque_atual = estoque_atual + ?, data_atualizacao=? WHERE id=?"
+            );
+            $nowEst = date('Y-m-d H:i:s');
+            foreach ($data['items'] as $it) {
+                $pid = isset($it['produto_id']) ? (int)$it['produto_id'] : 0;
+                $qty = (float)($it['quantidade'] ?? 1);
+                if ($pid > 0 && $qty > 0) {
+                    $sqEstoque->execute([$qty, $nowEst, $pid]);
+                }
+            }
+        }
         // ── Gerar conta a pagar automaticamente ──────────────────────────
         $valor_nfe = (float)($data['valor_total'] ?? 0);
         if ($valor_nfe > 0) {
@@ -2122,6 +3063,61 @@ if ($resource === 'nfe') {
         resp(200,['success'=>true]);
     }
     resp(405,['error'=>'Método não permitido']);
+}
+
+// ─── IBPT ─────────────────────────────────────────────────────
+if ($resource === 'ibpt') {
+    auth_required();
+    if ($method === 'GET') {
+        $total = (int)$db->query("SELECT COUNT(*) FROM ibpt")->fetchColumn();
+        $ufs   = $db->query("SELECT DISTINCT uf FROM ibpt ORDER BY uf")->fetchAll(PDO::FETCH_COLUMN);
+        $vigs  = $db->query("SELECT DISTINCT vigencia_fim FROM ibpt ORDER BY vigencia_fim DESC LIMIT 1")->fetchColumn();
+        resp(200, ['total' => $total, 'ufs' => $ufs, 'vigencia_fim' => $vigs ?: '']);
+    }
+    if ($method === 'POST') {
+        $csv     = $data['csv']     ?? '';
+        $uf      = strtoupper(trim($data['uf'] ?? ''));
+        $limpar  = !empty($data['limpar']);
+        if (!$csv)    resp(400, ['error' => 'CSV não informado']);
+        if (!$uf || strlen($uf) !== 2) resp(400, ['error' => 'UF inválida']);
+        // Remove BOM UTF-8
+        $csv = ltrim($csv, "\xEF\xBB\xBF");
+        // Detecta separador (; ou ,)
+        $sep = strpos(substr($csv, 0, 200), ';') !== false ? ';' : ',';
+        $lines = preg_split('/\r\n|\r|\n/', trim($csv));
+        if (count($lines) < 2) resp(400, ['error' => 'CSV sem dados']);
+        // Descarta cabeçalho
+        array_shift($lines);
+        if ($limpar) {
+            $db->prepare("DELETE FROM ibpt WHERE uf=?")->execute([$uf]);
+        }
+        $db->beginTransaction();
+        $ins = $db->prepare("INSERT OR REPLACE INTO ibpt (ncm,ex,tipo,descricao,nacional,importado,estadual,municipal,uf,vigencia_inicio,vigencia_fim) VALUES (?,?,?,?,?,?,?,?,?,?,?)");
+        $count = 0;
+        foreach ($lines as $line) {
+            $line = trim($line);
+            if ($line === '') continue;
+            $cols = str_getcsv($line, $sep);
+            if (count($cols) < 8) continue;
+            $ncm  = preg_replace('/\D/', '', $cols[0] ?? '');
+            if (strlen($ncm) < 7) continue; // ignora linhas inválidas
+            $ncm  = str_pad($ncm, 8, '0', STR_PAD_LEFT);
+            $ex   = trim($cols[1] ?? '');
+            $tipo = (int)($cols[2] ?? 0);
+            $desc = trim($cols[3] ?? '');
+            $nac  = (float)str_replace(',', '.', $cols[4] ?? 0);
+            $imp  = (float)str_replace(',', '.', $cols[5] ?? 0);
+            $est  = (float)str_replace(',', '.', $cols[6] ?? 0);
+            $mun  = (float)str_replace(',', '.', $cols[7] ?? 0);
+            $vini = trim($cols[8]  ?? '');
+            $vfim = trim($cols[9]  ?? '');
+            $ins->execute([$ncm,$ex,$tipo,$desc,$nac,$imp,$est,$mun,$uf,$vini,$vfim]);
+            $count++;
+        }
+        $db->commit();
+        resp(200, ['importados' => $count, 'uf' => $uf]);
+    }
+    resp(405, ['error' => 'Método não permitido']);
 }
 
 // ─── IMPORTAR XML NF-e ────────────────────────────────────────
@@ -2225,6 +3221,51 @@ if ($resource === 'nfe_importar_xml' && $method === 'POST') {
         $un  =(string)($prod->uCom  ?? 'UN');
         $vUnit=(float)($prod->vUnCom?? 0);
 
+        // ── Dados fiscais extraídos do XML ────────────────────
+        $ean_xml   = preg_replace('/\D/', '', (string)($prod->cEAN  ?? ''));
+        $ean_xml   = in_array(strlen($ean_xml), [8,12,13,14]) ? $ean_xml : '';
+        $cest_xml  = preg_replace('/\D/', '', (string)($prod->CEST  ?? ''));
+
+        // origem e CSOSN/CST ficam dentro das tags de ICMS
+        $orig_xml      = '0';
+        $csosn_xml     = '';
+        $cst_icms_xml  = '';
+        $aliq_icms_xml = 0.0;
+        $icmsGroup = $imp->ICMS ?? null;
+        if ($icmsGroup) {
+            foreach ($icmsGroup->children() as $icmsTag) {
+                $o = (string)($icmsTag->orig ?? '');
+                if ($o !== '') { $orig_xml = $o; }
+                $cs = (string)($icmsTag->CSOSN ?? ''); // Simples Nacional
+                if ($cs !== '') { $csosn_xml = $cs; }
+                $cst = (string)($icmsTag->CST ?? '');  // Regime Normal
+                if ($cst !== '') { $cst_icms_xml = $cst; $aliq_icms_xml = (float)($icmsTag->pICMS ?? 0); }
+                break; // primeiro grupo de ICMS é o relevante
+            }
+        }
+
+        // PIS
+        $cst_pis_xml  = '';
+        $aliq_pis_xml = 0.0;
+        $pisGroup = $imp->PIS ?? null;
+        if ($pisGroup) {
+            foreach ($pisGroup->children() as $pisTag) {
+                $cs = (string)($pisTag->CST ?? '');
+                if ($cs !== '') { $cst_pis_xml = $cs; $aliq_pis_xml = (float)($pisTag->pPIS ?? 0); break; }
+            }
+        }
+
+        // COFINS
+        $cst_cofins_xml  = '';
+        $aliq_cofins_xml = 0.0;
+        $cofinsGroup = $imp->COFINS ?? null;
+        if ($cofinsGroup) {
+            foreach ($cofinsGroup->children() as $cofinsTag) {
+                $cs = (string)($cofinsTag->CST ?? '');
+                if ($cs !== '') { $cst_cofins_xml = $cs; $aliq_cofins_xml = (float)($cofinsTag->pCOFINS ?? 0); break; }
+            }
+        }
+
         // Verificar se produto existe pelo código ou descrição
         $prodId = null;
         if($cod){
@@ -2244,12 +3285,34 @@ if ($resource === 'nfe_importar_xml' && $method === 'POST') {
             // Gerar código interno automático
             $lastCod=$db->query("SELECT MAX(CAST(SUBSTR(codigo_interno,2) AS INTEGER)) FROM produtos WHERE codigo_interno LIKE 'P%' AND LENGTH(codigo_interno)=7")->fetchColumn();
             $newCod='P'.str_pad((($lastCod?:(0))+1),6,'0',STR_PAD_LEFT);
-            // codigo_barras do XML: usar NULL se vazio (evita UNIQUE constraint)
-            $cod_barras_xml = !empty($cod) ? $cod : null;
-            $db->prepare("INSERT INTO produtos (tipo_item,codigo_interno,codigo_barras,descricao,unidade_medida,preco_custo,preco_venda,ncm,estoque_atual,ativo,data_criacao,data_atualizacao) VALUES ('produto',?,?,?,?,?,?,?,0,1,?,?)")
-               ->execute([$newCod,$cod_barras_xml,$desc,$un,$vUnit,$vUnit,$ncm,$now2,$now2]);
+            $cod_barras_xml = $ean_xml ?: (!empty($cod) ? $cod : null);
+            $db->prepare("INSERT INTO produtos (tipo_item,codigo_interno,codigo_barras,descricao,unidade_medida,preco_custo,preco_venda,ncm,cest,origem,csosn,cst_icms,aliq_icms,cst_pis,aliq_pis,cst_cofins,aliq_cofins,estoque_atual,ativo,data_criacao,data_atualizacao) VALUES ('produto',?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,0,1,?,?)")
+               ->execute([$newCod,$cod_barras_xml,$desc,$un,$vUnit,$vUnit,$ncm,$cest_xml,$orig_xml,$csosn_xml,$cst_icms_xml,$aliq_icms_xml,$cst_pis_xml,$aliq_pis_xml,$cst_cofins_xml,$aliq_cofins_xml,$now2,$now2]);
             $prodId=(int)$db->lastInsertId();
             $avisos[]="✅ Produto cadastrado automaticamente: {$desc} (Cód: {$newCod})";
+        } else {
+            // ── Atualiza campos fiscais vazios/padrão no produto existente ──
+            $pa=$db->prepare("SELECT codigo_barras,ncm,cest,origem,csosn,cst_icms,aliq_icms,cst_pis,aliq_pis,cst_cofins,aliq_cofins FROM produtos WHERE id=?");
+            $pa->execute([$prodId]);
+            $atual=$pa->fetch();
+
+            $sets=[]; $vals=[];
+            if (empty($atual['codigo_barras']) && $ean_xml)                       { $sets[]='codigo_barras=?'; $vals[]=$ean_xml; }
+            if (empty($atual['ncm'])           && $ncm)                           { $sets[]='ncm=?';           $vals[]=$ncm; }
+            if (empty($atual['cest'])          && $cest_xml)                      { $sets[]='cest=?';          $vals[]=$cest_xml; }
+            if ($orig_xml !== '0'              && ($atual['origem']??'0') === '0'){ $sets[]='origem=?';        $vals[]=$orig_xml; }
+            if (empty($atual['csosn'])         && $csosn_xml)                     { $sets[]='csosn=?';         $vals[]=$csosn_xml; }
+            if (empty($atual['cst_icms'])      && $cst_icms_xml)                  { $sets[]='cst_icms=?';      $vals[]=$cst_icms_xml;
+                                                                                    $sets[]='aliq_icms=?';     $vals[]=$aliq_icms_xml; }
+            if (empty($atual['cst_pis'])       && $cst_pis_xml)                   { $sets[]='cst_pis=?';       $vals[]=$cst_pis_xml;
+                                                                                    $sets[]='aliq_pis=?';      $vals[]=$aliq_pis_xml; }
+            if (empty($atual['cst_cofins'])    && $cst_cofins_xml)                { $sets[]='cst_cofins=?';    $vals[]=$cst_cofins_xml;
+                                                                                    $sets[]='aliq_cofins=?';   $vals[]=$aliq_cofins_xml; }
+            if (!empty($sets)) {
+                $sets[]='data_atualizacao=?'; $vals[]=date('Y-m-d H:i:s'); $vals[]=$prodId;
+                $db->prepare("UPDATE produtos SET ".implode(',',$sets)." WHERE id=?")->execute($vals);
+                $avisos[]="🔄 Dados fiscais atualizados: {$desc}";
+            }
         }
 
         $result['items'][] = [
@@ -2324,6 +3387,15 @@ if ($resource === 'contas_receber') {
 
         $where = ['1=1']; $params = [];
         if ($status_f) { $where[] = 'cr.status=?'; $params[] = $status_f; }
+        $status_list_raw = $_GET['status_list'] ?? '';
+        if ($status_list_raw) {
+            $statuses = array_values(array_filter(array_map('trim', explode(',', $status_list_raw))));
+            if ($statuses) {
+                $phs = implode(',', array_fill(0, count($statuses), '?'));
+                $where[] = "cr.status IN ($phs)";
+                $params = array_merge($params, $statuses);
+            }
+        }
         if ($q_raw)    { $where[] = '(cr.descricao LIKE ? OR c.nome LIKE ? OR cr.documento_ref LIKE ?)'; $q = '%'.$q_raw.'%'; $params[] = $q; $params[] = $q; $params[] = $q; }
         if ($data_ini) { $where[] = 'cr.data_vencimento >= ?'; $params[] = $data_ini; }
         if ($data_fim) { $where[] = 'cr.data_vencimento <= ?'; $params[] = $data_fim; }
@@ -2375,7 +3447,7 @@ if ($resource === 'contas_receber') {
     }
 
     // ── POST criar manual ─────────────────────────────────────────────────
-    if ($method === 'POST' && $action !== 'receber' && $action !== 'cancelar') {
+    if ($method === 'POST' && $action === '' && $id === null) {
         $desc = trim($data['descricao'] ?? ''); if (!$desc) resp(400, ['error' => 'Descrição obrigatória']);
         $valor = (float)($data['valor'] ?? 0); if ($valor <= 0) resp(400, ['error' => 'Valor deve ser maior que zero']);
         $now = date('Y-m-d H:i:s');
@@ -2421,6 +3493,84 @@ if ($resource === 'contas_receber') {
         $now = date('Y-m-d H:i:s');
         $db->prepare("UPDATE contas_receber SET status='Cancelada',data_atualizacao=? WHERE id=?")->execute([$now, $id]);
         resp(200, ['success' => true]);
+    }
+
+    // ── POST /contas_receber/{id}?action=estornar — estorno do recebimento ─
+    if ($method === 'POST' && $action === 'estornar' && $id !== null) {
+        $s = $db->prepare("SELECT * FROM contas_receber WHERE id=?"); $s->execute([$id]); $cr = $s->fetch();
+        if (!$cr) resp(404, ['error' => 'Conta não encontrada']);
+        if (!in_array($cr['status'], ['Recebida', 'Parcial'], true)) {
+            resp(400, ['error' => 'Apenas lançamentos recebidos podem ser estornados']);
+        }
+        $now = date('Y-m-d H:i:s');
+        $db->prepare("UPDATE contas_receber SET valor_recebido=0, data_recebimento=NULL, status='Aberta', data_atualizacao=? WHERE id=?")
+           ->execute([$now, $id]);
+        resp(200, ['success' => true]);
+    }
+
+    // ── POST /contas_receber/{id}?action=parcelar — divide em N parcelas ──
+    if ($method === 'POST' && $action === 'parcelar' && $id !== null) {
+        $s = $db->prepare("SELECT * FROM contas_receber WHERE id=?"); $s->execute([$id]); $cr = $s->fetch();
+        if (!$cr) resp(404, ['error' => 'Conta não encontrada']);
+        if (in_array($cr['status'], ['Cancelada','Recebida'], true)) {
+            resp(400, ['error' => 'Este lançamento não pode ser parcelado']);
+        }
+        $parcelas = $data['parcelas'] ?? [];
+        if (!is_array($parcelas) || count($parcelas) < 2) {
+            resp(400, ['error' => 'Informe ao menos 2 parcelas']);
+        }
+        $em_aberto = (float)$cr['valor'] - (float)($cr['valor_recebido'] ?? 0);
+        if ($em_aberto <= 0) resp(400, ['error' => 'Não há valor em aberto para parcelar']);
+        foreach ($parcelas as $i => $p) {
+            $v = (float)($p['valor'] ?? 0);
+            $dt = trim((string)($p['data_vencimento'] ?? ''));
+            if ($v <= 0) resp(400, ['error' => 'Valor inválido na parcela '.($i+1)]);
+            if (!$dt) resp(400, ['error' => 'Data inválida na parcela '.($i+1)]);
+        }
+
+        $now = date('Y-m-d H:i:s');
+        $desc_base = preg_replace('/\s*\(Parcela\s+\d+\/\d+\)\s*$/u', '', (string)$cr['descricao']);
+        $n = count($parcelas);
+        $db->beginTransaction();
+        try {
+            $ja_pago = (float)($cr['valor_recebido'] ?? 0);
+            if ($ja_pago > 0) {
+                // Preserva o valor já recebido: original vira "Recebida" pelo valor recebido
+                $db->prepare("UPDATE contas_receber SET valor=?,status='Recebida',descricao=?,data_atualizacao=? WHERE id=?")
+                   ->execute([$ja_pago, $desc_base.' (Pagamento parcial)', $now, $id]);
+            } else {
+                // Aberta: remove o original
+                $db->prepare("DELETE FROM contas_receber WHERE id=?")->execute([$id]);
+            }
+
+            $ins = $db->prepare("INSERT INTO contas_receber (origem,venda_id,parcela_id,cliente_id,categoria_id,conta_bancaria_id,descricao,valor,valor_recebido,data_emissao,data_vencimento,data_recebimento,status,documento_ref,observacoes,cliente_nome_manual,data_criacao,data_atualizacao) VALUES (?,?,?,?,?,?,?,?,0,?,?,NULL,'Aberta',?,?,?,?,?)");
+            $ids = [];
+            foreach ($parcelas as $i => $p) {
+                $desc_i = $desc_base.' (Parcela '.($i+1).'/'.$n.')';
+                $ins->execute([
+                    'manual',
+                    $cr['venda_id']           ?? null,
+                    $cr['parcela_id']         ?? null,
+                    $cr['cliente_id']         ?? null,
+                    $cr['categoria_id']       ?? null,
+                    $cr['conta_bancaria_id']  ?? null,
+                    $desc_i,
+                    (float)$p['valor'],
+                    $cr['data_emissao']       ?? date('Y-m-d'),
+                    $p['data_vencimento'],
+                    $cr['documento_ref']      ?? '',
+                    $cr['observacoes']        ?? '',
+                    $cr['cliente_nome_manual']?? '',
+                    $now, $now
+                ]);
+                $ids[] = (int)$db->lastInsertId();
+            }
+            $db->commit();
+            resp(201, ['success' => true, 'ids' => $ids]);
+        } catch (Throwable $e) {
+            $db->rollBack();
+            resp(500, ['error' => 'Falha ao parcelar: '.$e->getMessage()]);
+        }
     }
 
     // ── PUT editar ────────────────────────────────────────────────────────
@@ -2519,7 +3669,7 @@ if ($resource === 'contas_pagar') {
     }
 
     // ── POST criar manual ─────────────────────────────────────────────────
-    if ($method === 'POST' && $action !== 'pagar' && $action !== 'cancelar') {
+    if ($method === 'POST' && $action === '' && $id === null) {
         $desc = trim($data['descricao'] ?? ''); if (!$desc) resp(400, ['error' => 'Descrição obrigatória']);
         $valor = (float)($data['valor'] ?? 0); if ($valor <= 0) resp(400, ['error' => 'Valor deve ser maior que zero']);
         $now = date('Y-m-d H:i:s');
@@ -2564,6 +3714,80 @@ if ($resource === 'contas_pagar') {
         $now = date('Y-m-d H:i:s');
         $db->prepare("UPDATE contas_pagar SET status='Cancelada',data_atualizacao=? WHERE id=?")->execute([$now, $id]);
         resp(200, ['success' => true]);
+    }
+
+    // ── POST /contas_pagar/{id}?action=estornar — estorno do pagamento ────
+    if ($method === 'POST' && $action === 'estornar' && $id !== null) {
+        $s = $db->prepare("SELECT * FROM contas_pagar WHERE id=?"); $s->execute([$id]); $cp = $s->fetch();
+        if (!$cp) resp(404, ['error' => 'Conta não encontrada']);
+        if (!in_array($cp['status'], ['Paga', 'Parcial'], true)) {
+            resp(400, ['error' => 'Apenas lançamentos pagos podem ser estornados']);
+        }
+        $now = date('Y-m-d H:i:s');
+        $db->prepare("UPDATE contas_pagar SET valor_pago=0, data_pagamento=NULL, status='Aberta', data_atualizacao=? WHERE id=?")
+           ->execute([$now, $id]);
+        resp(200, ['success' => true]);
+    }
+
+    // ── POST /contas_pagar/{id}?action=parcelar — divide em N parcelas ────
+    if ($method === 'POST' && $action === 'parcelar' && $id !== null) {
+        $s = $db->prepare("SELECT * FROM contas_pagar WHERE id=?"); $s->execute([$id]); $cp = $s->fetch();
+        if (!$cp) resp(404, ['error' => 'Conta não encontrada']);
+        if (in_array($cp['status'], ['Cancelada','Paga'], true)) {
+            resp(400, ['error' => 'Este lançamento não pode ser parcelado']);
+        }
+        $parcelas = $data['parcelas'] ?? [];
+        if (!is_array($parcelas) || count($parcelas) < 2) {
+            resp(400, ['error' => 'Informe ao menos 2 parcelas']);
+        }
+        $em_aberto = (float)$cp['valor'] - (float)($cp['valor_pago'] ?? 0);
+        if ($em_aberto <= 0) resp(400, ['error' => 'Não há valor em aberto para parcelar']);
+        foreach ($parcelas as $i => $p) {
+            $v = (float)($p['valor'] ?? 0);
+            $dt = trim((string)($p['data_vencimento'] ?? ''));
+            if ($v <= 0) resp(400, ['error' => 'Valor inválido na parcela '.($i+1)]);
+            if (!$dt) resp(400, ['error' => 'Data inválida na parcela '.($i+1)]);
+        }
+
+        $now = date('Y-m-d H:i:s');
+        $desc_base = preg_replace('/\s*\(Parcela\s+\d+\/\d+\)\s*$/u', '', (string)$cp['descricao']);
+        $n = count($parcelas);
+        $db->beginTransaction();
+        try {
+            $ja_pago = (float)($cp['valor_pago'] ?? 0);
+            if ($ja_pago > 0) {
+                $db->prepare("UPDATE contas_pagar SET valor=?,status='Paga',descricao=?,data_atualizacao=? WHERE id=?")
+                   ->execute([$ja_pago, $desc_base.' (Pagamento parcial)', $now, $id]);
+            } else {
+                $db->prepare("DELETE FROM contas_pagar WHERE id=?")->execute([$id]);
+            }
+
+            $ins = $db->prepare("INSERT INTO contas_pagar (origem,nfe_id,fornecedor_id,categoria_id,conta_bancaria_id,descricao,valor,valor_pago,data_emissao,data_vencimento,data_pagamento,status,documento_ref,observacoes,data_criacao,data_atualizacao) VALUES (?,?,?,?,?,?,?,0,?,?,NULL,'Aberta',?,?,?,?)");
+            $ids = [];
+            foreach ($parcelas as $i => $p) {
+                $desc_i = $desc_base.' (Parcela '.($i+1).'/'.$n.')';
+                $ins->execute([
+                    'manual',
+                    $cp['nfe_id']             ?? null,
+                    $cp['fornecedor_id']      ?? null,
+                    $cp['categoria_id']       ?? null,
+                    $cp['conta_bancaria_id']  ?? null,
+                    $desc_i,
+                    (float)$p['valor'],
+                    $cp['data_emissao']       ?? date('Y-m-d'),
+                    $p['data_vencimento'],
+                    $cp['documento_ref']      ?? '',
+                    $cp['observacoes']        ?? '',
+                    $now, $now
+                ]);
+                $ids[] = (int)$db->lastInsertId();
+            }
+            $db->commit();
+            resp(201, ['success' => true, 'ids' => $ids]);
+        } catch (Throwable $e) {
+            $db->rollBack();
+            resp(500, ['error' => 'Falha ao parcelar: '.$e->getMessage()]);
+        }
     }
 
     // ── PUT editar ────────────────────────────────────────────────────────
@@ -2785,6 +4009,7 @@ if ($resource === 'empresa_certificado' && $method === 'POST') {
         'certificado_pfx'      => base64_encode($pfx_bin),
         'certificado_nome'     => $cert_nome,
         'certificado_validade' => $cert_validade,
+        'nfce_cert_senha'      => $senha,
     ];
 
     $razao_emp = (string)($emp['razao_social'] ?? '');
@@ -2884,13 +4109,18 @@ if ($resource === 'nfce_updates' && $method === 'GET') {
 
         // GET https://packagist.org/packages/{vendor}/{package}.json
         $url = 'https://packagist.org/packages/' . $nome . '.json';
+        $_packagist_cainfo = ssl_cainfo();
         $ctx = stream_context_create([
             'http' => [
                 'timeout' => 8,
                 'method'  => 'GET',
                 'header'  => "User-Agent: ConsertaOS/1.0\r\n",
             ],
-            'ssl' => ['verify_peer' => false, 'verify_peer_name' => false],
+            'ssl' => [
+                'verify_peer'      => true,
+                'verify_peer_name' => true,
+                'cafile'           => $_packagist_cainfo ?? '',
+            ],
         ]);
 
         $resposta = @file_get_contents($url, false, $ctx);
@@ -2943,6 +4173,108 @@ if ($resource === 'nfce_updates' && $method === 'GET') {
     ]);
 }
 
+// ── SUPORTE — proxy para a central em consertaos.com.br ──────
+if ($resource === 'suporte') {
+    auth_required();
+    $master_cfg  = file_exists(__DIR__ . '/config.php') ? (array)@require __DIR__ . '/config.php' : [];
+    $suporte_url = rtrim((string)($master_cfg['centralsuporte_url'] ?? ''), '/');
+    $secret      = (string)($master_cfg['provisionar_secret'] ?? '');
+    if ($suporte_url === '') resp(503, ['error' => 'Central de suporte não configurada']);
+
+    $u         = auth_required();
+    $loja_slug = basename(SAAS_DIR);
+    $emp       = $db->query("SELECT nome FROM empresa_dados WHERE id=1")->fetch() ?: [];
+    $loja_nome = trim((string)($emp['nome'] ?? $loja_slug));
+
+    // Determina action pelo método + parâmetros
+    if      ($method === 'GET' && $id === null)          $a = 'listar';
+    elseif  ($method === 'GET' && $id !== null)          $a = 'detalhes';
+    elseif  ($method === 'POST' && $action === 'mensagem') $a = 'mensagem';
+    else                                                  $a = $data['action'] ?? 'criar';
+
+    $payload = array_merge($data, [
+        'action'        => $a,
+        'chave_secreta' => $secret,
+        'loja_slug'     => $loja_slug,
+        'loja_nome'     => $loja_nome,
+        'usuario_nome'  => $u['nome']  ?? '',
+        'usuario_email' => $u['email'] ?? '',
+    ]);
+    if ($id !== null) $payload['id'] = $id;
+
+    $ch = curl_init($suporte_url);
+    curl_setopt_array($ch, [
+        CURLOPT_POST           => true,
+        CURLOPT_POSTFIELDS     => json_encode($payload),
+        CURLOPT_RETURNTRANSFER => true,
+        CURLOPT_TIMEOUT        => 15,
+        CURLOPT_SSL_VERIFYPEER => true,
+        CURLOPT_HTTPHEADER     => ['Content-Type: application/json'],
+    ]);
+    $resp     = curl_exec($ch);
+    $httpCode = (int)curl_getinfo($ch, CURLINFO_HTTP_CODE);
+    curl_close($ch);
+    http_response_code($httpCode ?: 500);
+    echo $resp ?: json_encode(['error' => 'Erro ao conectar com a central de suporte']);
+    exit;
+}
+
+// ── MEU PLANO ────────────────────────────────────────────────
+if ($resource === 'meu_plano' && $method === 'GET') {
+    auth_required();
+    $emp = $db->query("SELECT plano_nome,plano_valor,plano_data_inicio,plano_status,mp_preapproval_id,plano_landing_url,plano_landing_secret FROM empresa_dados WHERE id=1")->fetch() ?: [];
+    $resultado = [
+        'plano_nome'        => $emp['plano_nome']        ?? '',
+        'plano_valor'       => (float)($emp['plano_valor']   ?? 0),
+        'plano_data_inicio' => $emp['plano_data_inicio']  ?? '',
+        'plano_status'      => $emp['plano_status']       ?? 'ativo',
+        'mp_preapproval_id' => $emp['mp_preapproval_id']  ?? '',
+        'mp_status'         => null,
+        'next_payment'      => null,
+    ];
+    $landing_url    = $emp['plano_landing_url']    ?? '';
+    $landing_secret = $emp['plano_landing_secret'] ?? '';
+    $mp_id          = $emp['mp_preapproval_id']    ?? '';
+    if ($landing_url !== '' && $landing_secret !== '' && $mp_id !== '') {
+        $ch = curl_init($landing_url);
+        curl_setopt_array($ch, [CURLOPT_POST=>true, CURLOPT_RETURNTRANSFER=>true, CURLOPT_TIMEOUT=>10, CURLOPT_SSL_VERIFYPEER=>true,
+            CURLOPT_HTTPHEADER=>['Content-Type: application/json'],
+            CURLOPT_POSTFIELDS=>json_encode(['chave_secreta'=>$landing_secret,'action'=>'status','mp_preapproval_id'=>$mp_id])]);
+        $resp = curl_exec($ch); curl_close($ch);
+        if ($resp) {
+            $mp = json_decode($resp, true) ?: [];
+            $resultado['mp_status']    = $mp['status']       ?? null;
+            $resultado['next_payment'] = $mp['next_payment'] ?? null;
+        }
+    }
+    resp(200, $resultado);
+}
+
+if ($resource === 'cancelar_plano' && $method === 'POST') {
+    $u = auth_required();
+    if (($u['nivel_acesso'] ?? '') !== 'admin') resp(403, ['error' => 'Somente administradores podem cancelar o plano']);
+    $emp = $db->query("SELECT plano_landing_url,plano_landing_secret,mp_preapproval_id FROM empresa_dados WHERE id=1")->fetch() ?: [];
+    $landing_url    = $emp['plano_landing_url']    ?? '';
+    $landing_secret = $emp['plano_landing_secret'] ?? '';
+    $mp_id          = $emp['mp_preapproval_id']    ?? '';
+    if ($landing_url === '' || $landing_secret === '' || $mp_id === '') {
+        resp(400, ['error' => 'Configuração de assinatura não encontrada. Entre em contato com o suporte.']);
+    }
+    $ch = curl_init($landing_url);
+    curl_setopt_array($ch, [CURLOPT_POST=>true, CURLOPT_RETURNTRANSFER=>true, CURLOPT_TIMEOUT=>30, CURLOPT_SSL_VERIFYPEER=>true,
+        CURLOPT_HTTPHEADER=>['Content-Type: application/json'],
+        CURLOPT_POSTFIELDS=>json_encode(['chave_secreta'=>$landing_secret,'action'=>'cancelar','mp_preapproval_id'=>$mp_id])]);
+    $resp     = curl_exec($ch);
+    $httpCode = curl_getinfo($ch, CURLINFO_HTTP_CODE);
+    curl_close($ch);
+    if (!$resp || $httpCode !== 200) resp(500, ['error' => 'Erro ao processar cancelamento. Entre em contato com o suporte.']);
+    $r = json_decode($resp, true) ?: [];
+    if (!empty($r['ok'])) {
+        $db->prepare("UPDATE empresa_dados SET plano_status='cancelado' WHERE id=1")->execute();
+    }
+    resp(200, $r);
+}
+
 if ($resource === 'nfce_config') {
     auth_required();
     if ($method === 'GET') {
@@ -2988,6 +4320,56 @@ if ($resource === 'nfce') {
         $nf=$s->fetch(); resp($nf ? 200 : 404, $nf ?: ['error'=>'NFC-e não encontrada']);
     }
 
+    // Correção manual de status — usado quando a SEFAZ processou mas o banco ficou desatualizado
+    if ($method === 'POST' && ($data['action'] ?? '') === 'marcar_cancelada') {
+        auth_required();
+        $fix_id   = (int)($data['id'] ?? 0);
+        $fix_prot = trim($data['n_prot'] ?? '');
+        if (!$fix_id) resp(400, ['error' => 'ID não informado.']);
+        $s = $db->prepare("SELECT id,status,numero FROM nfce_emitidas WHERE id=?");
+        $s->execute([$fix_id]);
+        $nfFix = $s->fetch();
+        if (!$nfFix) resp(404, ['error' => 'NFC-e não encontrada.']);
+        $sets = ['status=?', 'data_atualizacao=?'];
+        $vals = ['Cancelada', date('Y-m-d H:i:s')];
+        if ($fix_prot) { $sets[] = 'n_prot=?'; $vals[] = $fix_prot; }
+        $vals[] = $fix_id;
+        $db->prepare("UPDATE nfce_emitidas SET " . implode(',', $sets) . " WHERE id=?")->execute($vals);
+        resp(200, ['success' => true, 'message' => "NFC-e #{$nfFix['numero']} marcada como Cancelada."]);
+    }
+
+    // Cancelamento via POST body (evita bloqueio de DELETE e query strings no Locaweb)
+    if ($method === 'POST' && ($data['action'] ?? '') === 'cancelar_nfce') {
+        if(!$nfephp_ok) resp(400,['error'=>'NFePHP nao instalado']);
+        $cancel_id = (int)($data['id'] ?? $id ?? 0);
+        if(!$cancel_id) resp(400,['error'=>'ID da NFC-e nao informado']);
+        $s=$db->prepare('SELECT * FROM nfce_emitidas WHERE id=?'); $s->execute([$cancel_id]); $nf=$s->fetch();
+        if(!$nf) resp(404,['error'=>'NFC-e nao encontrada']);
+        if($nf['status'] !== 'Autorizada') resp(400,['error'=>'Apenas NFC-e Autorizada pode ser cancelada. Status atual: '.$nf['status']]);
+        if(empty($nf['chave_acesso']) || strlen($nf['chave_acesso']) !== 44) resp(400,['error'=>'Chave de acesso inválida ou ausente para esta NFC-e (chave: '.($nf['chave_acesso']??'vazia').').']);
+        if(empty($nf['n_prot'])) resp(400,['error'=>'Protocolo de autorização (nProt) não encontrado para esta NFC-e. Não é possível cancelar sem o protocolo da SEFAZ.']);
+        $just = trim($data['justificativa'] ?? '');
+        if(strlen($just) < 15) resp(400,['error'=>'Justificativa minimo 15 caracteres']);
+        try {
+            require_once $autoload;
+            require_once __DIR__.'/src/NfceService.php';
+            $emp2 = $db->query('SELECT * FROM empresa_dados WHERE id=1')->fetch();
+            $cert_senha_cancel = $data['cert_senha'] ?? ($emp2['nfce_cert_senha'] ?? '');
+            if (!$cert_senha_cancel) resp(400,['error'=>'Informe a senha do certificado digital para cancelar.']);
+            $cfg2 = ['ambiente'=>$emp2['nfce_ambiente']??'homologacao','csc'=>$emp2['nfce_csc'],'csc_id'=>$emp2['nfce_csc_id'],'certificado_pfx'=>$emp2['certificado_pfx'],'certificado_senha'=>$cert_senha_cancel,'storage_dir'=>__DIR__.'/storage/nfce','empresa'=>['cnpj'=>$emp2['cnpj'],'razao_social'=>$emp2['razao_social'],'nome_fantasia'=>$emp2['nome'],'ie'=>$emp2['ie'],'cMun'=>$emp2['nfce_cmun']??'','cUF'=>(int)($emp2['nfce_cuf']??42),'uf'=>$emp2['uf'],'logradouro'=>$emp2['logradouro'],'numero'=>$emp2['numero'],'bairro'=>$emp2['bairro'],'cidade'=>$emp2['cidade'],'cep'=>$emp2['cep'],'telefone'=>$emp2['telefone']]];
+            $svc = new \ConsertaOS\NfcE\NfceService($cfg2);
+            $resultado = $svc->cancelar($nf['chave_acesso'], $just, $nf['n_prot'] ?? '');
+            if (!$resultado['autorizada']) {
+                $cstat_info = $resultado['cStat'] ? " [cStat {$resultado['cStat']}]" : '';
+                resp(400,['error'=>'SEFAZ recusou: '.($resultado['xMotivo'] ?? 'Sem retorno').$cstat_info]);
+            }
+            $nProt_cancel = $resultado['nProt'] ?: ($nf['n_prot'] ?? '');
+            $db->prepare('UPDATE nfce_emitidas SET status=?,n_prot=?,data_atualizacao=? WHERE id=?')
+               ->execute(['Cancelada', $nProt_cancel, date('Y-m-d H:i:s'), $cancel_id]);
+            resp(200,['success'=>true,'xMotivo'=>$resultado['xMotivo']??'Cancelada com sucesso','nProt'=>$nProt_cancel]);
+        } catch(\Exception $e){ resp(500,['error'=>$e->getMessage()]); }
+    }
+
     if ($method === 'POST' && !isset($_GET['action'])) {
         if (!$nfephp_ok) resp(400,['error'=>'NFePHP não instalado. Execute: bash instalar.sh no servidor via SSH.']);
         $csc    = $emp['nfce_csc']    ?? '';
@@ -3004,7 +4386,7 @@ if ($resource === 'nfce') {
             'csc_id'            => $emp['nfce_csc_id'] ?? '01',
             'certificado_pfx'   => $pfx_b64,
             'certificado_senha' => $cert_senha,
-            'storage_dir'       => __DIR__ . '/storage/nfce',
+            'storage_dir'       => SAAS_DIR . '/storage/nfce',
             'empresa' => [
                 'cnpj'         => $emp['cnpj'],
                 'razao_social' => $emp['razao_social'],
@@ -3033,6 +4415,25 @@ if ($resource === 'nfce') {
             'serie'  => (int)($emp['nfce_serie'] ?? 1),
         ]);
 
+        // ── Enriquecer itens com vTotTrib via tabela IBPT ──────────
+        $uf_emp = strtoupper($emp['uf'] ?? '');
+        if ($uf_emp && !empty($dadosNfce['itens'])) {
+            $ibptStmt = $db->prepare(
+                "SELECT nacional, importado FROM ibpt WHERE ncm=? AND tipo=0 AND uf=? ORDER BY ex ASC LIMIT 1"
+            );
+            foreach ($dadosNfce['itens'] as &$it_nfce) {
+                $ncm_it = preg_replace('/\D/', '', $it_nfce['ncm'] ?? '');
+                if (strlen($ncm_it) !== 8) continue;
+                $ibptStmt->execute([$ncm_it, $uf_emp]);
+                $ibpt_row = $ibptStmt->fetch();
+                if (!$ibpt_row) continue;
+                $orig_it  = (int)($it_nfce['origem'] ?? 0);
+                $aliq_it  = ($orig_it > 0) ? (float)$ibpt_row['importado'] : (float)$ibpt_row['nacional'];
+                $it_nfce['vTotTrib'] = round((float)($it_nfce['valor_total'] ?? 0) * $aliq_it / 100, 2);
+            }
+            unset($it_nfce);
+        }
+
         try {
             require_once $autoload;
             require_once __DIR__ . '/src/NfceService.php';
@@ -3051,8 +4452,18 @@ if ($resource === 'nfce') {
             $local_id=(int)$db->lastInsertId();
             if(!$resultado['autorizada'])
                 {} // Número rejeitado é pulado — deve ser inutilizado pelo usuário via Configurações → NFC-e
-            // Gerar conta a receber apenas se autorizada
+            // Baixa de estoque (apenas NFC-e autorizada)
             if ($resultado['autorizada']) {
+                $stBaixa = $db->prepare("UPDATE produtos SET estoque_atual = estoque_atual - ? WHERE id=?");
+                foreach ($data['itens'] ?? [] as $it) {
+                    $pid = isset($it['_produto_id']) ? (int)$it['_produto_id'] : 0;
+                    $qty = (float)($it['quantidade'] ?? 1);
+                    if ($pid > 0 && $qty > 0) $stBaixa->execute([$qty, $pid]);
+                }
+            }
+            // Gerar conta a receber apenas se autorizada e se o usuário optou por gerar lançamentos
+            $gerar_lancamentos = isset($data['gerar_lancamentos']) ? (bool)$data['gerar_lancamentos'] : true;
+            if ($resultado['autorizada'] && $gerar_lancamentos) {
                 // Tenta vincular cliente_id pelo CPF/CNPJ ou pelo nome
                 $cli_id_nfce   = $data['cliente_id'] ?? null;
                 $cli_cpf_nfce  = preg_replace('/\D/', '', $data['cliente_cpf']  ?? '');
@@ -3115,22 +4526,9 @@ if ($resource === 'nfce') {
         }
     }
 
+    // DELETE desativado (bloqueado pelo Locaweb). Cancelamento via POST body action=cancelar_nfce.
     if ($method === 'DELETE' && $id !== null) {
-        if(!$nfephp_ok) resp(400,['error'=>'NFePHP não instalado']);
-        $s=$db->prepare("SELECT * FROM nfce_emitidas WHERE id=?"); $s->execute([$id]); $nf=$s->fetch();
-        if(!$nf) resp(404,['error'=>'NFC-e não encontrada']);
-        $just=$data['justificativa']??'';
-        if(strlen($just)<15) resp(400,['error'=>'Justificativa mínimo 15 caracteres']);
-        try {
-            require_once $autoload;
-            require_once __DIR__.'/src/NfceService.php';
-            $emp2=$db->query("SELECT * FROM empresa_dados WHERE id=1")->fetch();
-            $cfg2=['ambiente'=>$emp2['nfce_ambiente']??'homologacao','csc'=>$emp2['nfce_csc'],'csc_id'=>$emp2['nfce_csc_id'],'certificado_pfx'=>$emp2['certificado_pfx'],'certificado_senha'=>$data['cert_senha']??$emp2['nfce_cert_senha']??'','storage_dir'=>__DIR__.'/storage/nfce','empresa'=>['cnpj'=>$emp2['cnpj'],'razao_social'=>$emp2['razao_social'],'nome_fantasia'=>$emp2['nome'],'ie'=>$emp2['ie'],'cMun'=>$emp2['nfce_cmun']??'','cUF'=>(int)($emp2['nfce_cuf']??42),'uf'=>$emp2['uf'],'logradouro'=>$emp2['logradouro'],'numero'=>$emp2['numero'],'bairro'=>$emp2['bairro'],'cidade'=>$emp2['cidade'],'cep'=>$emp2['cep'],'telefone'=>$emp2['telefone']]];
-            $svc=new \ConsertaOS\NfcE\NfceService($cfg2);
-            $svc->cancelar($nf['chave_acesso'],$just,$nf['n_prot']??'');
-            $db->prepare("UPDATE nfce_emitidas SET status='Cancelada',data_atualizacao=? WHERE id=?")->execute([date('Y-m-d H:i:s'),$id]);
-            resp(200,['success'=>true]);
-        } catch(\Exception $e){ resp(500,['error'=>$e->getMessage()]); }
+        resp(405,['error'=>'Use POST para cancelar NFC-e neste servidor.']);
     }
 
     // ── POST action=inutilizar — inutiliza faixa de numeração na SEFAZ ──
@@ -3156,7 +4554,7 @@ if ($resource === 'nfce') {
             'csc_id'            => $emp['nfce_csc_id'] ?? '01',
             'certificado_pfx'   => $pfx_b64,
             'certificado_senha' => $certSenha,
-            'storage_dir'       => __DIR__ . '/storage/nfce',
+            'storage_dir'       => SAAS_DIR . '/storage/nfce',
             'empresa' => [
                 'cnpj'         => $emp['cnpj'],
                 'razao_social' => $emp['razao_social'],
@@ -3248,6 +4646,91 @@ if ($resource === 'nfce') {
 // Recurso: ?resource=nfse
 // ═══════════════════════════════════════════════════════════════════════════
 
+// ── nfe_exportar — gera ZIP com XMLs e/ou DANFEs de NF-e filtrados ──────────
+if ($resource === 'nfe_exportar') {
+    auth_required();
+    $status_f  = $_GET['status']    ?? '';
+    $dt_ini_f  = $_GET['dt_inicio'] ?? '';
+    $dt_fim_f  = $_GET['dt_fim']    ?? '';
+    $inc_xml   = ($_GET['xml']   ?? '0') === '1';
+    $inc_danfe = ($_GET['danfe'] ?? '0') === '1';
+    $emails_f  = trim($_GET['emails'] ?? '');
+    $modo      = $_GET['modo']      ?? 'download';
+    $id_unico  = isset($_GET['id_unico']) && is_numeric($_GET['id_unico']) ? (int)$_GET['id_unico'] : null;
+    if (!$inc_xml && !$inc_danfe) resp(400, ['error' => 'Selecione ao menos XML ou DANFE para exportar.']);
+    $where = "status NOT IN ('Em Digitação','Aguardando')";
+    $params_e = [];
+    if ($id_unico !== null) { $where .= ' AND id = ?'; $params_e[] = $id_unico; }
+    if ($status_f) { $where .= ' AND status = ?'; $params_e[] = $status_f; }
+    if ($dt_ini_f) { $where .= ' AND DATE(data_emissao) >= ?'; $params_e[] = $dt_ini_f; }
+    if ($dt_fim_f) { $where .= ' AND DATE(data_emissao) <= ?'; $params_e[] = $dt_fim_f; }
+    $stmt = $db->prepare("SELECT * FROM nfe_emitidas WHERE $where ORDER BY id DESC LIMIT 500");
+    $stmt->execute($params_e);
+    $notas = $stmt->fetchAll();
+    if (empty($notas)) resp(404, ['error' => 'Nenhuma NF-e encontrada com os filtros informados.']);
+    $storageDir = SAAS_DIR . '/storage/nfe';
+    $tmpDir     = sys_get_temp_dir() . '/nfe_exp_' . uniqid();
+    mkdir($tmpDir, 0755, true);
+    $adicionados = 0;
+    foreach ($notas as $nf) {
+        $num    = (string)($nf['numero'] ?? '');
+        $status = strtolower($nf['status'] ?? '');
+        $subDir = ($status === 'autorizada') ? 'autorizada' : 'rejeitada';
+        if ($inc_xml) {
+            $xmlPath = "$storageDir/$subDir/{$num}.xml";
+            if (file_exists($xmlPath)) {
+                copy($xmlPath, "$tmpDir/NF-e_{$num}.xml");
+                $adicionados++;
+            } else {
+                $xmlFallback  = '<?xml version="1.0" encoding="UTF-8"?>' . "\n";
+                $xmlFallback .= '<!-- NF-e #' . $num . ' | Chave: ' . ($nf['chave_acesso'] ?? '') . ' | Status: ' . ($nf['status'] ?? '') . ' -->' . "\n";
+                $xmlFallback .= '<NFe numero="' . $num . '" chave="' . ($nf['chave_acesso'] ?? '') . '" status="' . ($nf['status'] ?? '') . '" valor="' . ($nf['valor_total'] ?? 0) . '"/>';
+                file_put_contents("$tmpDir/NF-e_{$num}.xml", $xmlFallback);
+                $adicionados++;
+            }
+        }
+        if ($inc_danfe) {
+            $xmlPath  = "$storageDir/$subDir/{$num}.xml";
+            $autoload = __DIR__ . '/nfephp/vendor/autoload.php';
+            $pdfGerado = false;
+            if (file_exists($xmlPath) && file_exists($autoload)) {
+                try {
+                    require_once $autoload;
+                    if (class_exists('NFePHP\DA\NFe\Danfe')) {
+                        $danfe = new \NFePHP\DA\NFe\Danfe(file_get_contents($xmlPath));
+                        $pdfContent = $danfe->render();
+                        file_put_contents("$tmpDir/DANFE_{$num}.pdf", $pdfContent);
+                        $pdfGerado = true; $adicionados++;
+                    }
+                } catch (\Exception $e) { $pdfGerado = false; }
+            }
+            if (!$pdfGerado) error_log('nfe_exportar: nao foi possivel gerar DANFE para NF-e #' . $num);
+        }
+    }
+    if ($adicionados === 0) {
+        array_map('unlink', glob("$tmpDir/*")); rmdir($tmpDir);
+        resp(404, ['error' => 'Nenhum arquivo encontrado no storage para as notas filtradas.']);
+    }
+    $zipPath = sys_get_temp_dir() . '/nfe_exportacao_' . date('Ymd_His') . '.zip';
+    $zip = new ZipArchive();
+    if ($zip->open($zipPath, ZipArchive::CREATE | ZipArchive::OVERWRITE) !== true) resp(500, ['error' => 'Erro ao criar arquivo ZIP.']);
+    foreach (glob("$tmpDir/*") as $f) { $zip->addFile($f, basename($f)); }
+    $zip->close();
+    array_map('unlink', glob("$tmpDir/*")); rmdir($tmpDir);
+    if ($modo === 'email') {
+        if (!$emails_f) resp(400, ['error' => 'E-mail não informado.']);
+        // TODO: enviar e-mail com anexo ZIP
+        resp(200, ['success' => true, 'total_notas' => count($notas), 'mensagem' => 'Envio de e-mail não configurado neste servidor.']);
+    }
+    $zipName = 'NF-e_exportacao_' . date('Ymd_His') . '.zip';
+    header('Content-Type: application/zip');
+    header('Content-Disposition: attachment; filename="' . $zipName . '"');
+    header('Content-Length: ' . filesize($zipPath));
+    readfile($zipPath);
+    unlink($zipPath);
+    exit;
+}
+
 // ── nfce_exportar — gera ZIP com XMLs e/ou DANFEs filtrados ──────────────────
 if ($resource === 'nfce_exportar') {
     auth_required();
@@ -3261,6 +4744,7 @@ if ($resource === 'nfce_exportar') {
     $inc_danfe  = ($_GET['danfe'] ?? '0') === '1';
     $emails_f   = trim($_GET['emails'] ?? '');
     $modo       = $_GET['modo']        ?? 'download'; // 'download' | 'email'
+    $id_unico   = isset($_GET['id_unico']) && is_numeric($_GET['id_unico']) ? (int)$_GET['id_unico'] : null;
 
     if (!$inc_xml && !$inc_danfe) {
         resp(400, ['error' => 'Selecione ao menos XML ou DANFE para exportar.']);
@@ -3270,6 +4754,7 @@ if ($resource === 'nfce_exportar') {
     $where = "status NOT IN ('Aguardando','Processando','Digitação','Erro')";
     $params_e = [];
 
+    if ($id_unico !== null) { $where .= ' AND id = ?'; $params_e[] = $id_unico; }
     if ($status_f) {
         $where .= ' AND status = ?';
         $params_e[] = $status_f;
@@ -3301,7 +4786,7 @@ if ($resource === 'nfce_exportar') {
         resp(404, ['error' => 'Nenhuma NFC-e encontrada com os filtros informados.']);
     }
 
-    $storageDir = __DIR__ . '/storage/nfce';
+    $storageDir = SAAS_DIR . '/storage/nfce';
     $tmpDir     = sys_get_temp_dir() . '/nfce_exp_' . uniqid();
     mkdir($tmpDir, 0755, true);
 
@@ -3400,6 +4885,24 @@ if ($resource === 'nfce_exportar') {
         array_map('unlink', glob("$tmpDir/*"));
         rmdir($tmpDir);
         resp(404, ['error' => 'Nenhum arquivo encontrado no storage para as notas filtradas.']);
+    }
+
+    // Item único + apenas um formato selecionado → retorna o arquivo diretamente (sem ZIP)
+    if ($id_unico !== null && ($inc_xml xor $inc_danfe)) {
+        $arquivos = glob("$tmpDir/*");
+        if (!empty($arquivos)) {
+            $arq = $arquivos[0];
+            $ext = strtolower(pathinfo($arq, PATHINFO_EXTENSION));
+            $ct  = $ext === 'xml' ? 'application/xml' : 'application/pdf';
+            header('Content-Type: ' . $ct);
+            header('Content-Disposition: attachment; filename="' . basename($arq) . '"');
+            header('Content-Length: ' . filesize($arq));
+            header('Cache-Control: no-cache');
+            readfile($arq);
+            array_map('unlink', glob("$tmpDir/*"));
+            rmdir($tmpDir);
+            exit;
+        }
     }
 
     // Compacta tudo em ZIP
@@ -3550,7 +5053,7 @@ if ($resource === 'nfse') {
             'nfse_serie'      => $emp['nfse_serie']       ?? '1',
             'nfse_ambiente'   => $emp['nfse_ambiente']    ?? 'homologacao',
             'nfse_usa_unidade'=> (int)($emp['nfse_usa_unidade'] ?? 0),
-            'storage_dir'     => __DIR__ . '/storage/nfse',
+            'storage_dir'     => SAAS_DIR . '/storage/nfse',
             'empresa' => [
                 'cnpj'        => $emp['cnpj']         ?? '',
                 'razao_social'=> $emp['razao_social']  ?? '',
@@ -3664,7 +5167,7 @@ if ($resource === 'nfse') {
             'nfse_cidade_tom' => $emp['nfse_cidade_tom']  ?? '',
             'nfse_serie'      => $emp['nfse_serie']       ?? '1',
             'nfse_ambiente'   => $emp['nfse_ambiente']    ?? 'homologacao',
-            'storage_dir'     => __DIR__ . '/storage/nfse',
+            'storage_dir'     => SAAS_DIR . '/storage/nfse',
             'empresa' => [
                 'cnpj'      => $emp['cnpj']        ?? '',
                 'cidade_tom'=> $emp['nfse_cidade_tom'] ?? '',
@@ -3794,6 +5297,73 @@ if ($resource === 'nfse_unidades' && $method === 'GET') {
 // POST api.php?resource=identificar_aparelho
 // Body JSON: { "imagem_base64": "...", "mime_type": "image/jpeg" }
 // ─────────────────────────────────────────────────────────────────────────────
+// ─── LOJA VIRTUAL: PUBLICAR ──────────────────────────────────────────────────
+// GET  → retorna status (slug configurado, arquivo publicado)
+// POST → cria/atualiza o index.php em /public_html/minhaloja/{slug}/
+if ($resource === 'publicar_loja') {
+    auth_required();
+
+    $emp  = $db->query("SELECT * FROM empresa_dados WHERE id=1")->fetch();
+    $slug = trim($emp['loja_slug'] ?? '');
+
+    if ($method === 'GET') {
+        if (!$slug) {
+            resp(200, ['slug' => '', 'publicada' => false, 'msg' => 'Nenhum link configurado.']);
+        }
+        $storeDir  = dirname(dirname(__DIR__)) . '/minhaloja/' . $slug;
+        $indexFile = $storeDir . '/index.php';
+        resp(200, [
+            'slug'       => $slug,
+            'publicada'  => file_exists($indexFile),
+            'store_dir'  => $storeDir,
+        ]);
+    }
+
+    if ($method === 'POST') {
+        if (!$slug) {
+            resp(400, ['error' => 'Configure e salve o link da loja antes de publicar.']);
+        }
+
+        $storeDir  = dirname(dirname(__DIR__)) . '/minhaloja/' . $slug;
+        $indexFile = $storeDir . '/index.php';
+
+        // Cria a pasta se não existir
+        if (!is_dir($storeDir)) {
+            if (!@mkdir($storeDir, 0755, true)) {
+                resp(500, ['error' => 'Não foi possível criar a pasta da loja: ' . $storeDir . '. Verifique as permissões do servidor.']);
+            }
+        }
+
+        if (!is_writable($storeDir)) {
+            resp(500, ['error' => 'Sem permissão de escrita em: ' . $storeDir]);
+        }
+
+        // Gera o index.php da loja (invalida OPcache para garantir versão atualizada)
+        $tplFile = __DIR__ . '/src/LojaTemplate.php';
+        if (!file_exists($tplFile)) {
+            resp(500, ['error' => 'Arquivo de template não encontrado no servidor: ' . $tplFile . '. Envie o arquivo src/LojaTemplate.php para o servidor.']);
+        }
+        if (function_exists('opcache_invalidate')) {
+            opcache_invalidate($tplFile, true);
+        }
+        ob_start();
+        require_once $tplFile;
+        ob_end_clean();
+        $phpContent = LojaTemplate::generate($db_path);
+
+        if (file_put_contents($indexFile, $phpContent) === false) {
+            resp(500, ['error' => 'Erro ao escrever o arquivo da loja em: ' . $indexFile]);
+        }
+
+        resp(200, [
+            'success'   => true,
+            'slug'      => $slug,
+            'store_dir' => $storeDir,
+            'msg'       => 'Loja publicada com sucesso em ' . $storeDir,
+        ]);
+    }
+}
+
 if ($resource === 'identificar_aparelho' && $method === 'POST') {
     auth_required();
 
@@ -3885,14 +5455,18 @@ PROMPT;
         // Tenta 2 vezes por modelo antes de passar para o próximo
         for ($t = 1; $t <= 2; $t++) {
             $ch = curl_init($url_modelo);
-            curl_setopt_array($ch, [
+            $_gemini_cainfo = ssl_cainfo();
+            $curl_opts_gemini = [
                 CURLOPT_RETURNTRANSFER => true,
                 CURLOPT_POST           => true,
                 CURLOPT_HTTPHEADER     => ['Content-Type: application/json'],
                 CURLOPT_POSTFIELDS     => json_encode($payload, JSON_UNESCAPED_UNICODE),
                 CURLOPT_TIMEOUT        => 45,
-                CURLOPT_SSL_VERIFYPEER => false,
-            ]);
+                CURLOPT_SSL_VERIFYPEER => true,
+                CURLOPT_SSL_VERIFYHOST => 2,
+            ];
+            if ($_gemini_cainfo) $curl_opts_gemini[CURLOPT_CAINFO] = $_gemini_cainfo;
+            curl_setopt_array($ch, $curl_opts_gemini);
 
             $response_raw = curl_exec($ch);
             $http_code    = curl_getinfo($ch, CURLINFO_HTTP_CODE);
@@ -3957,5 +5531,830 @@ PROMPT;
     resp(200, ['success' => true, 'dados' => $resultado, 'modelo' => $modelo_usado]);
 }
 
+// ─── NF-e: lista de CFOPs ────────────────────────────────────────────────────
+if ($resource === 'nfe_cfop') {
+    require_once __DIR__ . '/src/NfeService.php';
+    resp(200, \ConsertaOS\NFe\NfeService::listaCfops());
+}
 
-;
+// ─── NF-e: configuração (empresa_dados) ─────────────────────────────────────
+if ($resource === 'nfe_cfg') {
+    auth_required();
+    if ($method === 'GET') {
+        $emp = $db->query("SELECT nfe_ambiente, nfe_serie, nfe_proximo_numero FROM empresa_dados WHERE id=1")->fetch();
+        resp(200, $emp ?: []);
+    }
+    if ($method === 'POST') {
+        $fields = ['nfe_ambiente', 'nfe_serie', 'nfe_proximo_numero'];
+        $sets   = implode(',', array_map(fn($f) => "$f=?", $fields));
+        $vals   = array_map(fn($f) => $data[$f] ?? '', $fields);
+        $vals[] = 1;
+        $db->prepare("UPDATE empresa_dados SET $sets WHERE id=?")->execute($vals);
+        resp(200, ['success' => true]);
+    }
+    resp(405, ['error' => 'Método não permitido']);
+}
+
+// ─── NF-e (modelo 55): emissão via NFePHP ───────────────────────────────────
+if ($resource === 'nfe') {
+    auth_required();
+    $emp      = $db->query("SELECT * FROM empresa_dados WHERE id=1")->fetch();
+    $autoload = __DIR__ . '/nfephp/vendor/autoload.php';
+    $nfephp_ok = file_exists($autoload);
+
+    // ── GET: gerar DANFE PDF de NF-e ──────────────────────────────────────
+    if ($method === 'GET' && !empty($_GET['action']) && $_GET['action'] === 'danfe_pdf') {
+        if (!$nfephp_ok) resp(400, ['error' => 'NFePHP não instalado.']);
+        $nfe_id = (int)($_GET['id'] ?? 0);
+        if (!$nfe_id) resp(400, ['error' => 'ID não informado.']);
+        $s = $db->prepare("SELECT * FROM nfe_emitidas WHERE id=?");
+        $s->execute([$nfe_id]);
+        $nf = $s->fetch();
+        if (!$nf) resp(404, ['error' => 'NF-e não encontrada.']);
+        $num = (string)($nf['numero'] ?? '');
+        $storageDir = SAAS_DIR . '/storage/nfe';
+        $xmlPath = null;
+        foreach (['autorizada', 'rejeitada', 'enviados'] as $sub) {
+            $p = "$storageDir/$sub/{$num}.xml";
+            if (file_exists($p)) { $xmlPath = $p; break; }
+        }
+        if (!$xmlPath) resp(404, ['error' => 'XML da NF-e não encontrado no storage. A nota pode ter sido emitida antes do armazenamento local estar configurado.']);
+        try {
+            require_once $autoload;
+            $xmlContent = file_get_contents($xmlPath);
+            $danfe = new \NFePHP\DA\NFe\Danfe($xmlContent);
+            $pdf = $danfe->render();
+            header('Content-Type: application/pdf');
+            header('Content-Disposition: inline; filename="DANFE_NF-e_' . $num . '.pdf"');
+            header('Content-Length: ' . strlen($pdf));
+            echo $pdf;
+            exit;
+        } catch (\Throwable $e) {
+            resp(500, ['error' => 'Erro ao gerar DANFE: ' . $e->getMessage()]);
+        }
+    }
+
+    // ── GET: listar NF-e emitidas ──────────────────────────────────────────
+    if ($method === 'GET' && $id === null) {
+        $where = '1=1'; $params_n = [];
+        if (!empty($_GET['os_id']))    { $where .= ' AND os_id=?';    $params_n[] = (int)$_GET['os_id']; }
+        if (!empty($_GET['venda_id'])) { $where .= ' AND venda_id=?'; $params_n[] = (int)$_GET['venda_id']; }
+        if (!empty($_GET['status']))   { $where .= ' AND status=?';   $params_n[] = $_GET['status']; }
+        if (!empty($_GET['q'])) {
+            $q = '%' . $_GET['q'] . '%';
+            $where .= ' AND (numero LIKE ? OR chave_acesso LIKE ? OR dest_nome LIKE ?)';
+            $params_n[] = $q; $params_n[] = $q; $params_n[] = $q;
+        }
+        $limit = min((int)($_GET['limit'] ?? 100), 200);
+        $s = $db->prepare("SELECT * FROM nfe_emitidas WHERE $where ORDER BY id DESC LIMIT $limit");
+        $s->execute($params_n);
+        resp(200, $s->fetchAll());
+    }
+
+    // ── GET: buscar NF-e por ID ────────────────────────────────────────────
+    if ($method === 'GET' && $id !== null) {
+        $s = $db->prepare("SELECT * FROM nfe_emitidas WHERE id=?");
+        $s->execute([$id]);
+        $nf = $s->fetch();
+        resp($nf ? 200 : 404, $nf ?: ['error' => 'NF-e não encontrada']);
+    }
+
+    // ── POST: cancelar NF-e ────────────────────────────────────────────────
+    if ($method === 'POST' && ($data['action'] ?? '') === 'cancelar_nfe') {
+        if (!$nfephp_ok) resp(400, ['error' => 'NFePHP não instalado. Acesse /instalar_nfephp.php']);
+        $nfe_id = (int)($data['id'] ?? 0);
+        $just   = trim($data['justificativa'] ?? '');
+        if (!$nfe_id) resp(400, ['error' => 'ID da NF-e não informado.']);
+        if (strlen($just) < 15) resp(400, ['error' => 'Justificativa deve ter no mínimo 15 caracteres.']);
+        $s = $db->prepare("SELECT * FROM nfe_emitidas WHERE id=?");
+        $s->execute([$nfe_id]);
+        $nf = $s->fetch();
+        if (!$nf) resp(404, ['error' => 'NF-e não encontrada.']);
+        if ($nf['status'] !== 'Autorizada') resp(400, ['error' => 'Apenas NF-e autorizadas podem ser canceladas.']);
+        if (empty($nf['n_prot'])) resp(400, ['error' => 'Protocolo de autorização não encontrado.']);
+        $cert_senha = trim($data['cert_senha'] ?? ($emp['nfce_cert_senha'] ?? ''));
+        if (!$cert_senha) resp(400, ['error' => 'Senha do certificado não informada.']);
+        require_once $autoload;
+        require_once __DIR__ . '/src/NfeService.php';
+        $config = [
+            'ambiente'          => $emp['nfe_ambiente'] ?? 'homologacao',
+            'certificado_pfx'   => $emp['certificado_pfx'] ?? '',
+            'certificado_senha' => $cert_senha,
+            'storage_dir'       => __DIR__ . '/storage/nfe',
+            'empresa' => [
+                'cnpj'         => $emp['cnpj']         ?? '',
+                'razao_social' => $emp['razao_social']  ?? '',
+                'nome_fantasia'=> $emp['nome']          ?? '',
+                'ie'           => $emp['ie']            ?? '',
+                'cMun'         => $emp['nfce_cmun']     ?? '',
+                'cUF'          => $emp['nfce_cuf']      ?? '42',
+                'uf'           => $emp['uf']            ?? 'SC',
+                'logradouro'   => $emp['logradouro']    ?? '',
+                'numero'       => $emp['numero']        ?? '',
+                'bairro'       => $emp['bairro']        ?? '',
+                'cidade'       => $emp['cidade']        ?? '',
+                'cep'          => $emp['cep']           ?? '',
+                'telefone'     => $emp['telefone']      ?? '',
+            ],
+        ];
+        try {
+            $svc = new \ConsertaOS\NFe\NfeService($config);
+            $ret = $svc->cancelar($nf['chave_acesso'], $just, $nf['n_prot']);
+        } catch (\Throwable $e) {
+            resp(500, ['error' => $e->getMessage()]);
+        }
+        if ($ret['autorizada']) {
+            $db->prepare("UPDATE nfe_emitidas SET status='Cancelada', motivo_rejeicao=?, n_prot=?, data_atualizacao=? WHERE id=?")
+               ->execute([$ret['xMotivo'], $ret['nProt'] ?: $nf['n_prot'], date('Y-m-d H:i:s'), $nfe_id]);
+        }
+        resp($ret['autorizada'] ? 200 : 400, $ret);
+    }
+
+    // ── POST: consultar NF-e na SEFAZ ─────────────────────────────────────
+    if ($method === 'POST' && ($data['action'] ?? '') === 'consultar_nfe') {
+        if (!$nfephp_ok) resp(400, ['error' => 'NFePHP não instalado.']);
+        $nfe_id = (int)($data['id'] ?? 0);
+        if (!$nfe_id) resp(400, ['error' => 'ID da NF-e não informado.']);
+        $s = $db->prepare("SELECT * FROM nfe_emitidas WHERE id=?");
+        $s->execute([$nfe_id]);
+        $nf = $s->fetch();
+        if (!$nf) resp(404, ['error' => 'NF-e não encontrada.']);
+        if (empty($nf['chave_acesso'])) resp(400, ['error' => 'NF-e sem chave de acesso registrada.']);
+        $cert_senha = trim($data['cert_senha'] ?? ($emp['nfce_cert_senha'] ?? ''));
+        if (!$cert_senha) resp(400, ['error' => 'Senha do certificado não informada.']);
+        require_once $autoload;
+        require_once __DIR__ . '/src/NfeService.php';
+        $config = [
+            'ambiente'          => $emp['nfe_ambiente'] ?? 'homologacao',
+            'certificado_pfx'   => $emp['certificado_pfx'] ?? '',
+            'certificado_senha' => $cert_senha,
+            'storage_dir'       => __DIR__ . '/storage/nfe',
+            'empresa' => [
+                'cnpj'         => $emp['cnpj']         ?? '',
+                'razao_social' => $emp['razao_social']  ?? '',
+                'nome_fantasia'=> $emp['nome']          ?? '',
+                'ie'           => $emp['ie']            ?? '',
+                'cMun'         => $emp['nfce_cmun']     ?? '',
+                'cUF'          => $emp['nfce_cuf']      ?? '42',
+                'uf'           => $emp['uf']            ?? 'SC',
+                'logradouro'   => $emp['logradouro']    ?? '',
+                'numero'       => $emp['numero']        ?? '',
+                'bairro'       => $emp['bairro']        ?? '',
+                'cidade'       => $emp['cidade']        ?? '',
+                'cep'          => $emp['cep']           ?? '',
+                'telefone'     => $emp['telefone']      ?? '',
+            ],
+        ];
+        try {
+            $svc = new \ConsertaOS\NFe\NfeService($config);
+            $ret = $svc->consultar($nf['chave_acesso']);
+        } catch (\Throwable $e) {
+            resp(500, ['error' => $e->getMessage()]);
+        }
+        // Atualiza status local se a SEFAZ retornou estado diferente
+        if (!empty($ret['cStat'])) {
+            $novoStatus = null;
+            if (in_array($ret['cStat'], ['100','150'])) $novoStatus = 'Autorizada';
+            elseif ($ret['cStat'] === '101') $novoStatus = 'Cancelada';
+            elseif ($ret['cStat'] === '110') $novoStatus = 'Denegada';
+            if ($novoStatus && $novoStatus !== $nf['status']) {
+                $db->prepare("UPDATE nfe_emitidas SET status=?, data_atualizacao=? WHERE id=?")
+                   ->execute([$novoStatus, date('Y-m-d H:i:s'), $nfe_id]);
+            }
+        }
+        resp(200, $ret);
+    }
+
+    // ── POST: inutilizar numeração NF-e ──────────────────────────────────
+    if ($method === 'POST' && ($data['action'] ?? '') === 'inutilizar_nfe') {
+        if (!$nfephp_ok) resp(400, ['error' => 'NFePHP não instalado.']);
+        $nIni  = (int)($data['n_ini'] ?? 0);
+        $nFim  = (int)($data['n_fim'] ?? $nIni);
+        $serie = (int)($data['serie'] ?? 1);
+        $just  = trim($data['justificativa'] ?? '');
+        $cert_senha = trim($data['cert_senha'] ?? ($emp['nfce_cert_senha'] ?? ''));
+        if (!$nIni)            resp(400, ['error' => 'Número inicial inválido.']);
+        if ($nFim < $nIni)     resp(400, ['error' => 'Número final deve ser >= número inicial.']);
+        if (strlen($just) < 15) resp(400, ['error' => 'Justificativa muito curta (mínimo 15 caracteres).']);
+        if (!$cert_senha)      resp(400, ['error' => 'Senha do certificado não informada.']);
+        require_once $autoload;
+        require_once __DIR__ . '/src/NfeService.php';
+        $config = [
+            'ambiente'          => $emp['nfe_ambiente'] ?? 'homologacao',
+            'certificado_pfx'   => $emp['certificado_pfx'] ?? '',
+            'certificado_senha' => $cert_senha,
+            'storage_dir'       => __DIR__ . '/storage/nfe',
+            'empresa' => [
+                'cnpj'         => $emp['cnpj']         ?? '',
+                'razao_social' => $emp['razao_social']  ?? '',
+                'nome_fantasia'=> $emp['nome']          ?? '',
+                'ie'           => $emp['ie']            ?? '',
+                'cMun'         => $emp['nfce_cmun']     ?? '',
+                'cUF'          => $emp['nfce_cuf']      ?? '42',
+                'uf'           => $emp['uf']            ?? 'SC',
+                'logradouro'   => $emp['logradouro']    ?? '',
+                'numero'       => $emp['numero']        ?? '',
+                'bairro'       => $emp['bairro']        ?? '',
+                'cidade'       => $emp['cidade']        ?? '',
+                'cep'          => $emp['cep']           ?? '',
+                'telefone'     => $emp['telefone']      ?? '',
+            ],
+        ];
+        try {
+            $svc = new \ConsertaOS\NFe\NfeService($config);
+            $ret = $svc->inutilizar($serie, $nIni, $nFim, $just);
+        } catch (\Throwable $e) {
+            resp(500, ['error' => $e->getMessage()]);
+        }
+        resp($ret['inutilizado'] ? 200 : 422, $ret);
+    }
+
+    // ── POST: salvar rascunho de NF-e ─────────────────────────────────────
+    if ($method === 'POST' && ($data['action'] ?? '') === 'salvar_rascunho') {
+        $id_rascunho   = (int)($data['id'] ?? 0);
+        $natop         = trim($data['natop']     ?? 'VENDA DE MERCADORIA');
+        $dest_nome     = trim($data['dest_nome'] ?? '');
+        $valor_total   = (float)($data['valor_total'] ?? 0);
+        $rascunho_json = $data['rascunho_dados'] ?? '';
+        $agora         = date('Y-m-d H:i:s');
+        if ($id_rascunho > 0) {
+            $chk = $db->prepare("SELECT id FROM nfe_emitidas WHERE id=? AND status='Em Digitação'");
+            $chk->execute([$id_rascunho]);
+            if ($chk->fetch()) {
+                $db->prepare("UPDATE nfe_emitidas SET natop=?,dest_nome=?,valor_total=?,rascunho_dados=?,data_atualizacao=? WHERE id=?")
+                   ->execute([$natop,$dest_nome,$valor_total,$rascunho_json,$agora,$id_rascunho]);
+                resp(200, ['success'=>true,'id'=>$id_rascunho]);
+            }
+        }
+        $db->prepare("INSERT INTO nfe_emitidas (status,natop,dest_nome,valor_total,rascunho_dados,data_emissao,data_atualizacao) VALUES (?,?,?,?,?,?,?)")
+           ->execute(['Em Digitação',$natop,$dest_nome,$valor_total,$rascunho_json,$agora,$agora]);
+        resp(201, ['success'=>true,'id'=>(int)$db->lastInsertId()]);
+    }
+
+    // ── POST: emitir NF-e ──────────────────────────────────────────────────
+    if ($method === 'POST') {
+        if (!$nfephp_ok) resp(400, ['error' => 'NFePHP não instalado. Acesse /instalar_nfephp.php']);
+        $cert_senha = trim($data['cert_senha'] ?? ($emp['nfce_cert_senha'] ?? ''));
+        if (!$cert_senha) resp(400, ['error' => 'Senha do certificado não informada.']);
+        if (empty($data['itens'])) resp(400, ['error' => 'Pelo menos um item é obrigatório.']);
+
+        // Usa próximo número salvo e incrementa
+        $numero = (int)($emp['nfe_proximo_numero'] ?? 1);
+        $serie  = (int)($emp['nfe_serie'] ?? 1);
+        $data['numero'] = $numero;
+        $data['serie']  = $serie;
+
+        require_once $autoload;
+        require_once __DIR__ . '/src/NfeService.php';
+        $config = [
+            'ambiente'          => $emp['nfe_ambiente'] ?? 'homologacao',
+            'certificado_pfx'   => $emp['certificado_pfx'] ?? '',
+            'certificado_senha' => $cert_senha,
+            'storage_dir'       => __DIR__ . '/storage/nfe',
+            'empresa' => [
+                'cnpj'         => $emp['cnpj']         ?? '',
+                'razao_social' => $emp['razao_social']  ?? '',
+                'nome_fantasia'=> $emp['nome']          ?? '',
+                'ie'           => $emp['ie']            ?? '',
+                'cMun'         => $emp['nfce_cmun']     ?? '',
+                'cUF'          => $emp['nfce_cuf']      ?? '42',
+                'uf'           => $emp['uf']            ?? 'SC',
+                'logradouro'   => $emp['logradouro']    ?? '',
+                'numero'       => $emp['numero']        ?? '',
+                'bairro'       => $emp['bairro']        ?? '',
+                'cidade'       => $emp['cidade']        ?? '',
+                'cep'          => $emp['cep']           ?? '',
+                'telefone'     => $emp['telefone']      ?? '',
+            ],
+        ];
+
+        try {
+            $svc = new \ConsertaOS\NFe\NfeService($config);
+            $ret = $svc->emitir($data);
+        } catch (\Throwable $e) {
+            resp(500, ['error' => $e->getMessage()]);
+        }
+
+        // Resolve destinatário para gravar no banco
+        $destDoc = preg_replace('/\D/', '', $data['dest_cnpj'] ?? $data['dest_cpf'] ?? '');
+        $destNome = mb_strtoupper(trim($data['dest_nome'] ?? 'CONSUMIDOR'));
+        $destUF   = strtoupper($data['dest_uf'] ?? '');
+
+        // Grava no banco
+        $status = $ret['autorizada'] ? 'Autorizada' : 'Rejeitada';
+        $db->prepare("INSERT INTO nfe_emitidas
+            (os_id, venda_id, n_prot, status, numero, serie, chave_acesso, valor_total,
+             motivo_rejeicao, ambiente, payload_json, dest_nome, dest_cpfcnpj, dest_uf, natop, data_emissao, data_atualizacao)
+            VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)")
+           ->execute([
+               (int)($data['os_id']    ?? 0),
+               (int)($data['venda_id'] ?? 0),
+               $ret['nProt']   ?? '',
+               $status,
+               $numero,
+               $serie,
+               $ret['chave']   ?? '',
+               (float)($data['valor_total'] ?? 0),
+               $ret['xMotivo'] ?? '',
+               $emp['nfe_ambiente'] ?? 'homologacao',
+               json_encode($data),
+               $destNome,
+               $destDoc,
+               $destUF,
+               $data['natop'] ?? 'VENDA DE MERCADORIA',
+               date('Y-m-d H:i:s'),
+               date('Y-m-d H:i:s'),
+           ]);
+        $nfe_id = (int)$db->lastInsertId();
+
+        // Remove rascunho "Em Digitação" correspondente (evita duplicação na listagem)
+        $rascunho_id = (int)($data['rascunho_id'] ?? 0);
+        if ($rascunho_id > 0) {
+            $db->prepare("DELETE FROM nfe_emitidas WHERE id=? AND status='Em Digitação'")->execute([$rascunho_id]);
+        }
+
+        // Incrementa próximo número somente se autorizada
+        if ($ret['autorizada']) {
+            $db->prepare("UPDATE empresa_dados SET nfe_proximo_numero=? WHERE id=1")
+               ->execute([$numero + 1]);
+            // Baixa de estoque
+            $stBaixa = $db->prepare("UPDATE produtos SET estoque_atual = estoque_atual - ? WHERE id=?");
+            foreach ($data['itens'] ?? [] as $it) {
+                $pid = isset($it['produto_id']) ? (int)$it['produto_id'] : 0;
+                $qty = (float)($it['quantidade'] ?? 1);
+                if ($pid > 0 && $qty > 0) $stBaixa->execute([$qty, $pid]);
+            }
+        }
+
+        resp($ret['autorizada'] ? 200 : 422, array_merge($ret, ['nfe_id' => $nfe_id, 'numero' => $numero]));
+    }
+
+    resp(405, ['error' => 'Método não permitido']);
+}
+
+// ════════════════════════════════════════════════════════════════════════════
+// ─── RELATÓRIOS ────────────────────────────────────────────────────────────
+// ════════════════════════════════════════════════════════════════════════════
+if ($resource === 'relatorios' && $method === 'GET') {
+    auth_required();
+    $tipo     = $_GET['tipo'] ?? 'overview';
+    $periodo  = $_GET['periodo']  ?? 'mes';
+    $data_ini = $_GET['data_ini'] ?? null;
+    $data_fim = $_GET['data_fim'] ?? null;
+    switch ($periodo) {
+        case 'hoje':      $data_ini = date('Y-m-d'); $data_fim = date('Y-m-d'); break;
+        case 'semana':    $data_ini = date('Y-m-d', strtotime('monday this week')); $data_fim = date('Y-m-d'); break;
+        case 'mes':       $data_ini = date('Y-m-01'); $data_fim = date('Y-m-t'); break;
+        case 'mes_ant':   $data_ini = date('Y-m-01', strtotime('first day of last month')); $data_fim = date('Y-m-t', strtotime('last day of last month')); break;
+        case 'trimestre': $data_ini = date('Y-m-01', strtotime('-2 months')); $data_fim = date('Y-m-t'); break;
+        case 'ano':       $data_ini = date('Y-01-01'); $data_fim = date('Y-12-31'); break;
+        case 'tudo':      $data_ini = '1970-01-01'; $data_fim = '2999-12-31'; break;
+        default:
+            if (!$data_ini) $data_ini = date('Y-m-01');
+            if (!$data_fim) $data_fim = date('Y-m-t');
+    }
+    $d1 = $data_ini . ' 00:00:00';
+    $d2 = $data_fim . ' 23:59:59';
+
+    if ($tipo === 'overview') {
+        $rec = $db->prepare("SELECT COALESCE(SUM(total),0) FROM vendas WHERE status='Paga' AND COALESCE(data_criacao,data_confirmacao) BETWEEN ? AND ?");
+        $rec->execute([$d1, $d2]); $receita = (float)$rec->fetchColumn();
+
+        $qv = $db->prepare("SELECT COUNT(*) FROM vendas WHERE COALESCE(data_criacao,data_confirmacao) BETWEEN ? AND ?");
+        $qv->execute([$d1, $d2]); $qtd_vendas = (int)$qv->fetchColumn();
+
+        $qos = $db->prepare("SELECT COUNT(*) FROM ordens_servico WHERE data_abertura BETWEEN ? AND ?");
+        $qos->execute([$d1, $d2]); $qtd_os = (int)$qos->fetchColumn();
+
+        $qcli = $db->prepare("SELECT COUNT(*) FROM clientes WHERE data_criacao BETWEEN ? AND ?");
+        $qcli->execute([$d1, $d2]); $novos_clientes = (int)$qcli->fetchColumn();
+
+        $qe = (float)$db->query("SELECT COALESCE(SUM(estoque_atual),0) FROM produtos WHERE ativo=1 AND tipo_item='produto'")->fetchColumn();
+        $qpb = (int)$db->query("SELECT COUNT(*) FROM produtos WHERE ativo=1 AND tipo_item='produto' AND estoque_atual<=estoque_minimo AND estoque_minimo>0")->fetchColumn();
+
+        $cr = $db->prepare("SELECT COALESCE(SUM(valor_recebido),0) FROM contas_receber WHERE status IN ('Recebida','Parcial') AND data_recebimento BETWEEN ? AND ?");
+        $cr->execute([$data_ini, $data_fim]); $entradas = (float)$cr->fetchColumn();
+        $cp = $db->prepare("SELECT COALESCE(SUM(valor_pago),0) FROM contas_pagar WHERE status IN ('Paga','Parcial') AND data_pagamento BETWEEN ? AND ?");
+        $cp->execute([$data_ini, $data_fim]); $saidas = (float)$cp->fetchColumn();
+
+        resp(200, [
+            'periodo'        => ['inicio' => $data_ini, 'fim' => $data_fim],
+            'receita'        => $receita,
+            'qtd_vendas'     => $qtd_vendas,
+            'qtd_os'         => $qtd_os,
+            'novos_clientes' => $novos_clientes,
+            'estoque_total'  => $qe,
+            'produtos_baixos'=> $qpb,
+            'entradas'       => $entradas,
+            'saidas'         => $saidas,
+            'saldo'          => round($entradas - $saidas, 2),
+        ]);
+    }
+
+    if ($tipo === 'vendas') {
+        $status = $_GET['status'] ?? '';
+        $cliente_id = isset($_GET['cliente_id']) && $_GET['cliente_id'] !== '' ? (int)$_GET['cliente_id'] : 0;
+
+        $where = "COALESCE(v.data_criacao,v.data_confirmacao) BETWEEN ? AND ?";
+        $params = [$d1, $d2];
+        if ($status !== '') { $where .= " AND v.status = ?"; $params[] = $status; }
+        if ($cliente_id > 0) { $where .= " AND v.cliente_id = ?"; $params[] = $cliente_id; }
+
+        $sql = "SELECT v.id, v.status, v.total, v.desconto_valor, v.acrescimo_valor,
+                       COALESCE(v.data_criacao,v.data_confirmacao) AS data_venda,
+                       c.nome AS cliente_nome,
+                       f.nome AS vendedor_nome
+                FROM vendas v
+                LEFT JOIN clientes c ON v.cliente_id=c.id
+                LEFT JOIN funcionarios f ON v.vendedor_id=f.id
+                WHERE $where
+                ORDER BY data_venda DESC, v.id DESC";
+        $st = $db->prepare($sql); $st->execute($params);
+        $rows = $st->fetchAll();
+
+        // Agregados por status
+        $agg = [];
+        foreach ($rows as $r) {
+            $s = $r['status'] ?: 'Indefinido';
+            if (!isset($agg[$s])) $agg[$s] = ['qtd' => 0, 'total' => 0];
+            $agg[$s]['qtd']++; $agg[$s]['total'] += (float)$r['total'];
+        }
+        $por_status = [];
+        foreach ($agg as $s => $a) $por_status[] = ['status' => $s, 'qtd' => $a['qtd'], 'total' => round($a['total'], 2)];
+
+        // Por dia
+        $sd = $db->prepare("SELECT DATE(COALESCE(v.data_criacao,v.data_confirmacao)) AS dia,
+                                  COUNT(*) AS qtd,
+                                  COALESCE(SUM(v.total),0) AS total
+                           FROM vendas v WHERE $where
+                           GROUP BY dia ORDER BY dia");
+        $sd->execute($params); $por_dia = $sd->fetchAll();
+
+        // Top produtos
+        $whereTP = str_replace('v.data_criacao', 'v.data_criacao', $where);
+        $sql_tp = "SELECT COALESCE(p.descricao, vi.descricao, '—') AS descricao,
+                          SUM(vi.quantidade) AS qty,
+                          SUM(vi.subtotal) AS total
+                   FROM venda_items vi
+                   JOIN vendas v ON vi.venda_id=v.id
+                   LEFT JOIN produtos p ON vi.produto_id=p.id
+                   WHERE $whereTP AND v.status NOT IN ('Cancelada','Digitação')
+                   GROUP BY vi.produto_id, vi.descricao
+                   ORDER BY total DESC LIMIT 20";
+        $stp = $db->prepare($sql_tp); $stp->execute($params);
+        $top_produtos = $stp->fetchAll();
+
+        $totais = [
+            'qtd'          => count($rows),
+            'total_bruto'  => array_sum(array_map(fn($r) => (float)$r['total'], $rows)),
+            'total_pago'   => array_sum(array_map(fn($r) => $r['status'] === 'Paga' ? (float)$r['total'] : 0, $rows)),
+            'total_pendente' => array_sum(array_map(fn($r) => $r['status'] === 'Pendente' ? (float)$r['total'] : 0, $rows)),
+            'total_cancelado' => array_sum(array_map(fn($r) => $r['status'] === 'Cancelada' ? (float)$r['total'] : 0, $rows)),
+        ];
+        $totais = array_map(fn($v) => is_float($v) ? round($v, 2) : $v, $totais);
+
+        resp(200, [
+            'periodo'      => ['inicio' => $data_ini, 'fim' => $data_fim],
+            'totais'       => $totais,
+            'por_status'   => $por_status,
+            'por_dia'      => $por_dia,
+            'top_produtos' => $top_produtos,
+            'rows'         => $rows,
+        ]);
+    }
+
+    if ($tipo === 'servicos') {
+        $status = $_GET['status'] ?? '';
+        $tipo_aparelho_id = isset($_GET['tipo_aparelho_id']) && $_GET['tipo_aparelho_id'] !== '' ? (int)$_GET['tipo_aparelho_id'] : 0;
+
+        $where = "os.data_abertura BETWEEN ? AND ?";
+        $params = [$d1, $d2];
+        if ($status !== '') { $where .= " AND os.status = ?"; $params[] = $status; }
+        if ($tipo_aparelho_id > 0) { $where .= " AND os.tipo_aparelho_id = ?"; $params[] = $tipo_aparelho_id; }
+
+        $sql = "SELECT os.id, os.status, os.descricao, os.data_abertura, os.previsao_conclusao,
+                       c.nome AS cliente_nome,
+                       ta.nome AS tipo_nome,
+                       m.nome AS marca_nome,
+                       mo.nome AS modelo_nome,
+                       (SELECT COALESCE(SUM(o.valor),0) FROM orcamentos o WHERE o.ordem_id=os.id) AS valor_orcado
+                FROM ordens_servico os
+                LEFT JOIN clientes c ON os.cliente_id=c.id
+                LEFT JOIN tipos_aparelho ta ON os.tipo_aparelho_id=ta.id
+                LEFT JOIN marcas m ON os.marca_id=m.id
+                LEFT JOIN modelos mo ON os.modelo_id=mo.id
+                WHERE $where
+                ORDER BY os.data_abertura DESC, os.id DESC";
+        $st = $db->prepare($sql); $st->execute($params);
+        $rows = $st->fetchAll();
+
+        $por_status = [];
+        $agg = [];
+        foreach ($rows as $r) {
+            $s = $r['status'] ?: 'Indefinido';
+            if (!isset($agg[$s])) $agg[$s] = ['qtd' => 0, 'total' => 0];
+            $agg[$s]['qtd']++; $agg[$s]['total'] += (float)$r['valor_orcado'];
+        }
+        foreach ($agg as $s => $a) $por_status[] = ['status' => $s, 'qtd' => $a['qtd'], 'total' => round($a['total'], 2)];
+
+        // Por tipo de aparelho
+        $sql_ta = "SELECT COALESCE(ta.nome,'Não informado') AS tipo_nome,
+                          COUNT(*) AS qtd
+                   FROM ordens_servico os
+                   LEFT JOIN tipos_aparelho ta ON os.tipo_aparelho_id=ta.id
+                   WHERE $where
+                   GROUP BY os.tipo_aparelho_id ORDER BY qtd DESC LIMIT 15";
+        $sta = $db->prepare($sql_ta); $sta->execute($params);
+        $por_tipo = $sta->fetchAll();
+
+        $valor_total = array_sum(array_map(fn($r) => (float)$r['valor_orcado'], $rows));
+        $atrasadas = 0; $hoje = date('Y-m-d');
+        foreach ($rows as $r) {
+            $finais = ['Cancelada', 'Faturada', 'Aguardando Aparelho', 'Aguardando Aprovação', 'Aguardando Retirada'];
+            if (!empty($r['previsao_conclusao']) && $r['previsao_conclusao'] < $hoje
+                && stripos($r['status'], 'Conclu') === false
+                && stripos($r['status'], 'Sem Con') === false
+                && stripos($r['status'], 'Não Aprov') === false
+                && !in_array($r['status'], $finais)) $atrasadas++;
+        }
+
+        resp(200, [
+            'periodo'   => ['inicio' => $data_ini, 'fim' => $data_fim],
+            'totais'    => [
+                'qtd'          => count($rows),
+                'valor_total'  => round($valor_total, 2),
+                'atrasadas'    => $atrasadas,
+                'concluidas'   => count(array_filter($rows, fn($r) => stripos($r['status'], 'Conclu') !== false)),
+            ],
+            'por_status'=> $por_status,
+            'por_tipo'  => $por_tipo,
+            'rows'      => $rows,
+        ]);
+    }
+
+    if ($tipo === 'financeiro') {
+        // Contas a Receber + Pagar no período
+        $cr_sql = "SELECT cr.id, cr.descricao, cr.valor, cr.valor_recebido, cr.data_emissao,
+                          cr.data_vencimento, cr.data_recebimento, cr.status,
+                          COALESCE(c.nome, cr.cliente_nome_manual,'—') AS cliente_nome,
+                          cf.nome AS categoria
+                   FROM contas_receber cr
+                   LEFT JOIN clientes c ON cr.cliente_id=c.id
+                   LEFT JOIN categorias_financeiras cf ON cr.categoria_id=cf.id
+                   WHERE cr.data_vencimento BETWEEN ? AND ?
+                   ORDER BY cr.data_vencimento DESC";
+        $st = $db->prepare($cr_sql); $st->execute([$data_ini, $data_fim]);
+        $contas_receber = $st->fetchAll();
+
+        $cp_sql = "SELECT cp.id, cp.descricao, cp.valor, cp.valor_pago, cp.data_emissao,
+                          cp.data_vencimento, cp.data_pagamento, cp.status,
+                          COALESCE(f.razao_social,'—') AS fornecedor_nome,
+                          cf.nome AS categoria
+                   FROM contas_pagar cp
+                   LEFT JOIN fornecedores f ON cp.fornecedor_id=f.id
+                   LEFT JOIN categorias_financeiras cf ON cp.categoria_id=cf.id
+                   WHERE cp.data_vencimento BETWEEN ? AND ?
+                   ORDER BY cp.data_vencimento DESC";
+        $st2 = $db->prepare($cp_sql); $st2->execute([$data_ini, $data_fim]);
+        $contas_pagar = $st2->fetchAll();
+
+        $tot_receber  = array_sum(array_map(fn($r) => (float)$r['valor'], $contas_receber));
+        $tot_recebido = array_sum(array_map(fn($r) => (float)$r['valor_recebido'], $contas_receber));
+        $tot_pagar    = array_sum(array_map(fn($r) => (float)$r['valor'], $contas_pagar));
+        $tot_pago     = array_sum(array_map(fn($r) => (float)$r['valor_pago'], $contas_pagar));
+
+        $em_aberto_receber = array_sum(array_map(fn($r) => $r['status'] === 'Aberta' ? (float)$r['valor'] : 0, $contas_receber));
+        $vencido_receber   = array_sum(array_map(fn($r) => ($r['status'] === 'Aberta' && $r['data_vencimento'] < date('Y-m-d')) ? (float)$r['valor'] : 0, $contas_receber));
+        $em_aberto_pagar   = array_sum(array_map(fn($r) => $r['status'] === 'Aberta' ? (float)$r['valor'] : 0, $contas_pagar));
+        $vencido_pagar     = array_sum(array_map(fn($r) => ($r['status'] === 'Aberta' && $r['data_vencimento'] < date('Y-m-d')) ? (float)$r['valor'] : 0, $contas_pagar));
+
+        // Categorias de receita/despesa
+        $cat_rec_sql = "SELECT COALESCE(cf.nome,'Sem categoria') AS categoria,
+                              COALESCE(SUM(cr.valor_recebido),0) AS total
+                       FROM contas_receber cr
+                       LEFT JOIN categorias_financeiras cf ON cr.categoria_id=cf.id
+                       WHERE cr.status IN ('Recebida','Parcial') AND cr.data_recebimento BETWEEN ? AND ?
+                       GROUP BY cr.categoria_id ORDER BY total DESC";
+        $stcr = $db->prepare($cat_rec_sql); $stcr->execute([$data_ini, $data_fim]);
+        $por_categoria_receita = $stcr->fetchAll();
+
+        $cat_desp_sql = "SELECT COALESCE(cf.nome,'Sem categoria') AS categoria,
+                               COALESCE(SUM(cp.valor_pago),0) AS total
+                        FROM contas_pagar cp
+                        LEFT JOIN categorias_financeiras cf ON cp.categoria_id=cf.id
+                        WHERE cp.status IN ('Paga','Parcial') AND cp.data_pagamento BETWEEN ? AND ?
+                        GROUP BY cp.categoria_id ORDER BY total DESC";
+        $stcp = $db->prepare($cat_desp_sql); $stcp->execute([$data_ini, $data_fim]);
+        $por_categoria_despesa = $stcp->fetchAll();
+
+        resp(200, [
+            'periodo' => ['inicio' => $data_ini, 'fim' => $data_fim],
+            'totais'  => [
+                'a_receber'         => round($tot_receber, 2),
+                'recebido'          => round($tot_recebido, 2),
+                'a_pagar'           => round($tot_pagar, 2),
+                'pago'              => round($tot_pago, 2),
+                'saldo'             => round($tot_recebido - $tot_pago, 2),
+                'em_aberto_receber' => round($em_aberto_receber, 2),
+                'vencido_receber'   => round($vencido_receber, 2),
+                'em_aberto_pagar'   => round($em_aberto_pagar, 2),
+                'vencido_pagar'     => round($vencido_pagar, 2),
+            ],
+            'por_categoria_receita' => $por_categoria_receita,
+            'por_categoria_despesa' => $por_categoria_despesa,
+            'contas_receber'        => $contas_receber,
+            'contas_pagar'          => $contas_pagar,
+        ]);
+    }
+
+    if ($tipo === 'estoque') {
+        $alerta = $_GET['alerta'] ?? ''; // 'baixo', 'zerado', '' = todos
+
+        $where = "ativo=1 AND tipo_item='produto'";
+        if ($alerta === 'baixo')   $where .= " AND estoque_atual <= estoque_minimo AND estoque_minimo > 0";
+        if ($alerta === 'zerado')  $where .= " AND estoque_atual <= 0";
+
+        $sql = "SELECT id, codigo_interno, codigo_barras, descricao, unidade_medida,
+                       estoque_atual, estoque_minimo, estoque_maximo,
+                       preco_custo, preco_venda, localizacao
+                FROM produtos WHERE $where ORDER BY descricao";
+        $rows = $db->query($sql)->fetchAll();
+
+        $valor_custo  = 0; $valor_venda = 0; $qtd_baixo = 0; $qtd_zerado = 0;
+        foreach ($rows as $r) {
+            $valor_custo += (float)$r['estoque_atual'] * (float)$r['preco_custo'];
+            $valor_venda += (float)$r['estoque_atual'] * (float)$r['preco_venda'];
+            if ((float)$r['estoque_atual'] <= 0) $qtd_zerado++;
+            elseif ((float)$r['estoque_minimo'] > 0 && (float)$r['estoque_atual'] <= (float)$r['estoque_minimo']) $qtd_baixo++;
+        }
+
+        // Itens mais movimentados no período
+        $sql_mov = "SELECT COALESCE(p.descricao, vi.descricao, '—') AS descricao,
+                           SUM(vi.quantidade) AS qtd_vendida,
+                           SUM(vi.subtotal) AS total
+                    FROM venda_items vi
+                    JOIN vendas v ON vi.venda_id=v.id
+                    LEFT JOIN produtos p ON vi.produto_id=p.id
+                    WHERE COALESCE(v.data_criacao,v.data_confirmacao) BETWEEN ? AND ?
+                      AND v.status NOT IN ('Cancelada','Digitação')
+                    GROUP BY vi.produto_id, vi.descricao
+                    ORDER BY qtd_vendida DESC LIMIT 20";
+        $stm = $db->prepare($sql_mov); $stm->execute([$d1, $d2]);
+        $mais_vendidos = $stm->fetchAll();
+
+        resp(200, [
+            'periodo' => ['inicio' => $data_ini, 'fim' => $data_fim],
+            'totais'  => [
+                'qtd_itens'       => count($rows),
+                'valor_custo'     => round($valor_custo, 2),
+                'valor_venda'     => round($valor_venda, 2),
+                'margem_potencial'=> round($valor_venda - $valor_custo, 2),
+                'qtd_baixo'       => $qtd_baixo,
+                'qtd_zerado'      => $qtd_zerado,
+            ],
+            'rows'           => $rows,
+            'mais_vendidos'  => $mais_vendidos,
+        ]);
+    }
+
+    if ($tipo === 'cadastros') {
+        // Resumo de cadastros (totais sempre + crescimento no período)
+        $tot_cli       = (int)$db->query("SELECT COUNT(*) FROM clientes")->fetchColumn();
+        $tot_for       = (int)$db->query("SELECT COUNT(*) FROM fornecedores WHERE ativo=1")->fetchColumn();
+        $tot_pro       = (int)$db->query("SELECT COUNT(*) FROM produtos WHERE ativo=1 AND tipo_item='produto'")->fetchColumn();
+        $tot_serv      = (int)$db->query("SELECT COUNT(*) FROM produtos WHERE ativo=1 AND tipo_item='servico'")->fetchColumn();
+        $tot_func      = (int)$db->query("SELECT COUNT(*) FROM funcionarios WHERE status='Ativo'")->fetchColumn();
+        $tot_usu       = (int)$db->query("SELECT COUNT(*) FROM usuarios WHERE ativo=1")->fetchColumn();
+
+        // Novos no período
+        $stN = $db->prepare("SELECT COUNT(*) FROM clientes WHERE data_criacao BETWEEN ? AND ?");
+        $stN->execute([$d1, $d2]); $novos_cli = (int)$stN->fetchColumn();
+        $stN2 = $db->prepare("SELECT COUNT(*) FROM fornecedores WHERE data_criacao BETWEEN ? AND ?");
+        $stN2->execute([$d1, $d2]); $novos_for = (int)$stN2->fetchColumn();
+        $stN3 = $db->prepare("SELECT COUNT(*) FROM produtos WHERE data_criacao BETWEEN ? AND ?");
+        $stN3->execute([$d1, $d2]); $novos_pro = (int)$stN3->fetchColumn();
+
+        // Top clientes (por valor)
+        $sql_tc = "SELECT c.id, c.nome,
+                          COUNT(v.id) AS qtd_vendas,
+                          COALESCE(SUM(v.total),0) AS total_comprado
+                   FROM clientes c
+                   LEFT JOIN vendas v ON v.cliente_id=c.id AND v.status='Paga'
+                                       AND COALESCE(v.data_criacao,v.data_confirmacao) BETWEEN ? AND ?
+                   GROUP BY c.id ORDER BY total_comprado DESC LIMIT 20";
+        $sttc = $db->prepare($sql_tc); $sttc->execute([$d1, $d2]);
+        $top_clientes = $sttc->fetchAll();
+
+        // Lista de clientes recentes
+        $stRC = $db->prepare("SELECT id, nome, telefone, email, cpf, data_criacao FROM clientes WHERE data_criacao BETWEEN ? AND ? ORDER BY data_criacao DESC LIMIT 50");
+        $stRC->execute([$d1, $d2]);
+        $clientes_recentes = $stRC->fetchAll();
+
+        resp(200, [
+            'periodo' => ['inicio' => $data_ini, 'fim' => $data_fim],
+            'totais'  => [
+                'clientes'     => $tot_cli,
+                'fornecedores' => $tot_for,
+                'produtos'     => $tot_pro,
+                'servicos'     => $tot_serv,
+                'funcionarios' => $tot_func,
+                'usuarios'     => $tot_usu,
+                'novos_clientes'     => $novos_cli,
+                'novos_fornecedores' => $novos_for,
+                'novos_produtos'     => $novos_pro,
+            ],
+            'top_clientes'      => $top_clientes,
+            'clientes_recentes' => $clientes_recentes,
+        ]);
+    }
+
+    if ($tipo === 'comissoes') {
+        $funcionario_id = isset($_GET['funcionario_id']) && $_GET['funcionario_id'] !== '' ? (int)$_GET['funcionario_id'] : 0;
+
+        $where = "cr.status = 'Recebida'
+                  AND cr.origem IN ('venda','nfce','nfe')
+                  AND cr.data_recebimento BETWEEN ? AND ?
+                  AND f.comissao_venda_ativo = 1";
+        $params = [$data_ini, $data_fim];
+        if ($funcionario_id > 0) { $where .= " AND f.id = ?"; $params[] = $funcionario_id; }
+
+        // Resolve a venda real cobrindo origem 'venda', 'nfce' e 'nfe'.
+        // Para 'venda', cr.venda_id = vendas.id.
+        // Para 'nfce'/'nfe', cr.venda_id = nfce_emitidas.id / nfe_emitidas.id, e a venda real está em <doc>.venda_id.
+        $sql = "
+            SELECT
+                f.id   AS funcionario_id,
+                f.nome AS funcionario_nome,
+                f.comissao_venda_percentual AS percentual,
+                v.id   AS venda_id,
+                cr.id  AS cr_id,
+                cr.descricao,
+                cr.origem,
+                cr.valor,
+                cr.valor_recebido,
+                cr.data_emissao,
+                cr.data_vencimento,
+                cr.data_recebimento,
+                COALESCE(c.nome, cr.cliente_nome_manual,'—') AS cliente_nome,
+                ROUND(cr.valor_recebido * f.comissao_venda_percentual / 100.0, 2) AS comissao
+            FROM contas_receber cr
+            LEFT JOIN vendas         vd   ON cr.origem='venda' AND vd.id   = cr.venda_id
+            LEFT JOIN nfce_emitidas  nfce ON cr.origem='nfce'  AND nfce.id = cr.venda_id
+            LEFT JOIN nfe_emitidas   nfe  ON cr.origem='nfe'   AND nfe.id  = cr.venda_id
+            LEFT JOIN vendas v ON v.id = COALESCE(vd.id, nfce.venda_id, nfe.venda_id)
+            INNER JOIN funcionarios f ON f.id = v.vendedor_id
+            LEFT JOIN clientes c ON c.id = cr.cliente_id
+            WHERE $where
+            ORDER BY f.nome, cr.data_recebimento DESC, cr.id DESC
+        ";
+        $st = $db->prepare($sql);
+        $st->execute($params);
+        $rows = $st->fetchAll();
+
+        // Agregados por funcionário
+        $funcs = [];
+        foreach ($rows as $r) {
+            $fid = (int)$r['funcionario_id'];
+            if (!isset($funcs[$fid])) {
+                $funcs[$fid] = [
+                    'funcionario_id'   => $fid,
+                    'funcionario_nome' => $r['funcionario_nome'],
+                    'percentual'       => (float)$r['percentual'],
+                    'qtd_recebimentos' => 0,
+                    'base_calculo'     => 0,
+                    'total_comissao'   => 0,
+                ];
+            }
+            $funcs[$fid]['qtd_recebimentos']++;
+            $funcs[$fid]['base_calculo']   += (float)$r['valor_recebido'];
+            $funcs[$fid]['total_comissao'] += (float)$r['comissao'];
+        }
+        $por_funcionario = array_values(array_map(function($f){
+            $f['base_calculo']   = round($f['base_calculo'], 2);
+            $f['total_comissao'] = round($f['total_comissao'], 2);
+            return $f;
+        }, $funcs));
+        usort($por_funcionario, fn($a,$b) => $b['total_comissao'] <=> $a['total_comissao']);
+
+        // Funcionários elegíveis (para popular o filtro, mesmo sem recebimentos)
+        $stE = $db->query("SELECT id, nome, comissao_venda_percentual FROM funcionarios WHERE status='Ativo' AND comissao_venda_ativo=1 ORDER BY nome");
+        $funcionarios_elegiveis = $stE->fetchAll();
+
+        $totais = [
+            'qtd_recebimentos' => count($rows),
+            'qtd_funcionarios' => count($por_funcionario),
+            'base_calculo'     => round(array_sum(array_map(fn($r) => (float)$r['valor_recebido'], $rows)), 2),
+            'total_comissao'   => round(array_sum(array_map(fn($r) => (float)$r['comissao'], $rows)), 2),
+        ];
+
+        resp(200, [
+            'periodo'                 => ['inicio' => $data_ini, 'fim' => $data_fim],
+            'totais'                  => $totais,
+            'por_funcionario'         => $por_funcionario,
+            'rows'                    => $rows,
+            'funcionarios_elegiveis'  => $funcionarios_elegiveis,
+        ]);
+    }
+
+    resp(400, ['error' => 'Tipo de relatório inválido']);
+}
